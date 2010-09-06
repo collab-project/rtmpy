@@ -259,16 +259,18 @@ class FrameSize(Message):
     @type size: C{int}
     """
 
+    RTMP_TYPE = FRAME_SIZE
+
     def __init__(self, size=None):
         self.size = size
 
-    def decode(self, buf):
+    def decode(self, buf, **kwargs):
         """
         Decode a frame size message.
         """
         self.size = buf.read_ulong()
 
-    def encode(self, buf):
+    def encode(self, buf, **kwargs):
         """
         Encode a frame size message.
         """
@@ -296,16 +298,18 @@ class BytesRead(Message):
     @type bytes: C{int}
     """
 
+    RTMP_TYPE = BYTES_READ
+
     def __init__(self, bytes=None):
         self.bytes = bytes
 
-    def decode(self, buf):
+    def decode(self, buf, **kwargs):
         """
         Decode a bytes read message.
         """
         self.bytes = buf.read_ulong()
 
-    def encode(self, buf):
+    def encode(self, buf, **kwargs):
         """
         Encode a bytes read message.
         """
@@ -330,6 +334,8 @@ class ControlMessage(Message):
     A control message. Akin to Red5's Ping event.
     """
 
+    RTMP_TYPE = CONTROL
+
     UNDEFINED = -1
     PING = 6
     PONG = 7
@@ -340,7 +346,7 @@ class ControlMessage(Message):
         self.value2 = value2
         self.value3 = value3
 
-    def decode(self, buf):
+    def decode(self, buf, **kwargs):
         """
         Decode a control message.
         """
@@ -353,7 +359,7 @@ class ControlMessage(Message):
         except IOError:
             pass
 
-    def encode(self, buf):
+    def encode(self, buf, **kwargs):
         """
         Encode a control message.
         """
@@ -398,16 +404,18 @@ class DownstreamBandwidth(Message):
     A downstream bandwidth message.
     """
 
+    RTMP_TYPE = DOWNSTREAM_BANDWIDTH
+
     def __init__(self, bandwidth=None):
         self.bandwidth = bandwidth
 
-    def decode(self, buf):
+    def decode(self, buf, **kwargs):
         """
         Decode a downstream bandwidth message.
         """
         self.bandwidth = buf.read_ulong()
 
-    def encode(self, buf):
+    def encode(self, buf, **kwargs):
         """
         Encode a downstream bandwidth message.
         """
@@ -436,18 +444,20 @@ class UpstreamBandwidth(Message):
     @param extra: Not sure what this is supposed to represent at the moment.
     """
 
+    RTMP_TYPE = UPSTREAM_BANDWIDTH
+
     def __init__(self, bandwidth=None, extra=None):
         self.bandwidth = bandwidth
         self.extra = extra
 
-    def decode(self, buf):
+    def decode(self, buf, **kwargs):
         """
         Decode an upstream bandwidth message.
         """
         self.bandwidth = buf.read_ulong()
         self.extra = buf.read_uchar()
 
-    def encode(self, buf):
+    def encode(self, buf, **kwargs):
         """
         Encode an upstream bandwidth message.
         """
@@ -483,32 +493,35 @@ class Notify(Message):
 
     @param name: The method name to call.
     @type name: C{str}
-    @param id: The global identifier (per stream) for the call.
-    @type id: C{int}
-    @param args: A list of elements to represent the method arguments.
+    @param args: A list of method arguments.
     """
 
-    def __init__(self, name=None, id=None, *args):
+    RTMP_TYPE = NOTIFY
+
+    def __init__(self, name=None, *args):
         self.name = name
-        self.id = id
         self.argv = list(args)
 
-    def decode(self, buf, encoding=0):
+    def decode(self, buf, encoding=None, **kwargs):
         """
         Decode a notification message.
         """
-        gen = pyamf.decode(buf, encoding=encoding)
+        if encoding is None:
+            raise EncodeError('An encoding value is required')
 
-        self.name = gen.next()
-        self.id = gen.next()
+        decoder = pyamf.get_decoder(encoding, stream=buf)
 
-        self.argv = list(gen)
+        self.name = decoder.next()
+        self.argv = [x for x in decoder]
 
-    def encode(self, buf, encoding=0):
+    def encode(self, buf, encoding=None, **kwargs):
         """
         Encode a notification message.
         """
-        args = [self.name, self.id] + self.argv
+        if encoding is None:
+            raise EncodeError('An encoding value is required')
+
+        args = [self.name] + self.argv
 
         encoder = pyamf.get_encoder(encoding, buf)
 
@@ -522,16 +535,50 @@ class Notify(Message):
         return listener.onNotify(self, timestamp)
 
 
-class Invoke(Notify):
+class Invoke(Message):
     """
     Similar to L{Notify} but a reply is expected.
     """
+
+    RTMP_TYPE = INVOKE
+
+    def __init__(self, name=None, id=None, *args):
+        self.name = name
+        self.id = id
+        self.argv = list(args)
+
+    def decode(self, buf, encoding=None, **kwargs):
+        """
+        Decode a notification message.
+        """
+        if encoding is None:
+            raise EncodeError('An encoding value is required')
+
+        decoder = pyamf.get_decoder(encoding, stream=buf)
+
+        self.name = decoder.next()
+        self.id = decoder.next()
+        self.argv = [x for x in decoder]
+
+    def encode(self, buf, encoding=None, **kwargs):
+        """
+        Encode a notification message.
+        """
+        if encoding is None:
+            raise EncodeError('An encoding value is required')
+
+        args = [self.name, self.id] + self.argv
+
+        encoder = pyamf.get_encoder(encoding, buf)
+
+        for a in args:
+            encoder.writeElement(a)
 
     def dispatch(self, listener, timestamp):
         """
         Dispatches the message to the listener.
         """
-        listener.onInvoke(self, timestamp)
+        listener.onInvoke(self.name, self.id, self.argv, timestamp)
 
 
 class StreamingMessage(Message):
@@ -545,14 +592,14 @@ class StreamingMessage(Message):
     def __init__(self, data=None):
         self.data = data
 
-    def decode(self, buf):
+    def decode(self, buf, **kwargs):
         """
         Decode a streaming message.
         """
         if not buf.at_eof():
             self.data = buf.read()
 
-    def encode(self, buf):
+    def encode(self, buf, **kwargs):
         """
         Encode a streaming message.
         """
@@ -571,6 +618,8 @@ class AudioData(StreamingMessage):
     A message containing audio data.
     """
 
+    RTMP_TYPE = AUDIO_DATA
+
     def dispatch(self, listener, timestamp):
         """
         Dispatches the message to the listener.
@@ -583,6 +632,8 @@ class VideoData(StreamingMessage):
     """
     A message containing video data.
     """
+
+    RTMP_TYPE = AUDIO_DATA
 
     def dispatch(self, listener, timestamp):
         """
@@ -623,3 +674,11 @@ def get_type_class(datatype):
         return TYPE_MAP[datatype]
     except KeyError:
         raise UnknownEventType('Unknown event type %r' % (datatype,))
+
+
+def is_command_type(datatype):
+    """
+    Determines if the data type supplied is a command type. This means that the
+    related RTMP message must be marshalled on channel id = 2.
+    """
+    return datatype <= UPSTREAM_BANDWIDTH

@@ -13,7 +13,46 @@ from rtmpy import util
 from rtmpy.protocol import rtmp, handshake, version
 
 
-class ServerControlStream(object):
+class NetConnectionError(Exception):
+    """
+    """
+
+
+class ConnectError(NetConnectionError):
+    """
+    """
+
+
+class ConnectFailed(ConnectError):
+    """
+    """
+
+    code = 'NetConnection.Connect.Failed'
+
+
+class ServerControlStream(rtmp.ControlStream):
+    """
+    """
+
+    def _handleInvokeResponse(self, result, id_):
+        return result
+
+    def onInvoke(self, name, id_, args, timestamp):
+        """
+        """
+        if self.application is None:
+            if name == 'connect':
+                d = self.activeInvokes[id_] = defer.maybeDeferred(
+                    self.protocol.onConnect, args[0])
+
+                d.addBoth(self._handleInvokeResponse, id_)
+
+                return d
+
+        rtmp.ControlStream.onInvoke(self, name, id_, args, timestamp)
+
+
+class OldServerControlStream(object):
     """
     """
 
@@ -318,68 +357,10 @@ class Application(object):
         self.disconnect(client)
 
 
-class ServerProtocol(object):
+class ServerProtocol(rtmp.RTMPProtocol):
     """
     A basic RTMP protocol that will act like a server.
     """
-
-    def buildHandshakeNegotiator(self):
-        """
-        Generate a server handshake negotiator.
-
-        @rtype: L{handshake.ServerNegotiator}
-        """
-        return handshake.ServerNegotiator(self)
-
-    def connectionMade(self):
-        """
-        Called when a connection is made to the RTMP server. Will begin
-        handshake negotiations.
-        """
-        rtmp.BaseProtocol.connectionMade(self)
-
-        self.handshaker.start(version=0)
-        self.client = None
-        self.application = None
-        self.pendingConnection = None
-
-    def handshakeSuccess(self):
-        """
-        Called when the handshake has been successfully negotiated. If there
-        is any data in the negotiator buffer it will be re-inserted into the
-        main RTMP stream (as any data after the handshake must be RTMP).
-        """
-        b = self.handshaker.buffer
-
-        rtmp.BaseProtocol.handshakeSuccess(self)
-
-        s = ServerControlStream(self)
-
-        self.registerStream(0, s)
-
-        self.encoder.registerScheduler(scheduler.LoopingChannelScheduler())
-
-        if len(b) > 0:
-            self.dataReceived(b)
-
-    def connectionLost(self, reason):
-        """
-        The connection to the client has been lost.
-        """
-        rtmp.BaseProtocol.connectionLost(self, reason)
-
-        if self.client and self.application:
-            self.application.disconnect(self.client)
-
-        if self.pendingConnection:
-            self.pendingConnection.errback(reason)
-
-            self.pendingConnection = None
-
-        for x in self.activeStreams:
-            s = self.streams[x]
-
-            s.connectionLost(reason)
 
     def onConnect(self, args):
         """
@@ -490,69 +471,121 @@ class ServerProtocol(object):
 class ServerFactory(protocol.ServerFactory):
     """
     RTMP server protocol factory.
+
+    Maintains a collection of applications that RTMP clients connect and
+    interact with.
+
+    @ivar applications: A collection of active applications.
+    @type applications: C{dict} of C{name} -> L{IApplication}
+    @ivar _pendingApplications: A collection of applications that are pending
+        activation.
+    @type _pendingApplications: C{dict} of C{name} -> L{IApplication}
     """
 
-    protocol = rtmp.RTMPProtocol
+    protocol = ServerProtocol
     protocolVersion = version.RTMP
 
     upstreamBandwidth = 2500000L
     downstreamBandwidth = 2500000L
     fmsVer = u'FMS/3,5,1,516'
 
-    def __init__(self, applications={}):
+    def __init__(self, applications=None):
         self.applications = {}
         self._pendingApplications = {}
 
-        for name, app in applications.iteritems():
-            self.registerApplication(name, app)
+        if applications:
+            for name, app in applications.items():
+                self.registerApplication(name, app)
+
+    def getControlStream(self, protocol, streamId):
+        """
+        Creates and returns the stream for controlling server side protocol
+        instances.
+
+        @param protocol: The L{ServerProtocol} instance created by
+            L{buildProtocol}
+        @param streamId: The streamId for this control stream. Always 0.
+        """
+        return ServerControlStream(protocol, streamId)
 
     def getApplication(self, name):
         """
-        Returns the application mounted at C{name}, if any.
+        Returns the active L{IApplication} instance related to C{name}. If
+        there is no active application, C{None} is returned.
         """
         return self.applications.get(name, None)
 
     def registerApplication(self, name, app):
         """
+        Registers the application to this factory instance. Returns a deferred
+        which will signal the completion of the registration process.
+
+        @param name: The name of the application. This is the name that the
+            player will use when connecting to this server. An example::
+
+            RTMP uri: http://appserver.mydomain.com/webApp; name: webApp.
+        @param app: The L{IApplication} object that will interact with the
+            RTMP clients.
+        @return: A deferred signalling the completion of the registration
+            process.
         """
+        if name in self._pendingApplications or name in self.applications:
+            raise InvalidApplication(
+                '%r is already a registered application' % (name,))
+
         self._pendingApplications[name] = app
 
         d = defer.maybeDeferred(app.startup)
 
-        def eb(f):
-            del self._pendingApplications[name]
+        def cleanup_pending(r):
+            try:
+                del self._pendingApplications[name]
+            except KeyError:
+                raise InvalidApplication('Pending application %r not found '
+                    '(already unregistered?)' % (name,))
 
-            return f
+            return r
 
-        def cb(res):
+        def attach_application(res):
             self.applications[name] = app
             app.factory = self
             app.name = name
 
             return res
 
-        d.addBoth(eb).addCallback(cb)
+        d.addBoth(cleanup_pending).addCallback(attach_application)
 
         return d
 
-    def unregisterApplication(self, nameOrApp):
+    def unregisterApplication(self, name):
         """
+        Unregisters and removes the named application from this factory. Any
+        subsequent connect attempts to the C{name} will be met with an error.
+
+        @return: A L{defer.Deferred} when the process is complete. The result
+            will be the application instance that was successfully unregistered.
         """
-        name = nameOrApp
+        try:
+            app = self._pendingApplications.pop(name)
 
-        if IApplication.implementedBy(nameOrApp):
-            name = app.name
+            return defer.succeed(app)
+        except KeyError:
+            pass
 
-        app = self.applications[name]
+        try:
+            app = self.applications[name]
+        except KeyError:
+            raise InvalidApplication('Unknown application %r' % (name,))
 
+        # TODO: run through the attached clients and signal the app shutdown.
         d = defer.maybeDeferred(app.shutdown)
 
         def cb(res):
-            del self.applications[name]
+            app = self.applications.pop(name)
             app.factory = None
             app.name = None
 
-            return res
+            return app
 
         d.addBoth(cb)
 
@@ -560,6 +593,9 @@ class ServerFactory(protocol.ServerFactory):
 
     def buildHandshakeNegotiator(self, protocol):
         """
+        Returns a negotiator capable of handling server side handshakes.
+
+        @param protocol: The L{ServerProtocol} requiring handshake negotiations.
         """
         i = handshake.get_implementation(self.protocolVersion)
 

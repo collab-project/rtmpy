@@ -7,6 +7,8 @@ Decoding tests for L{rtmpy.rtmp.codec}.
 
 import unittest
 
+from pyamf.util import BufferedByteStream
+
 from rtmpy.protocol.rtmp import codec, header
 
 
@@ -36,8 +38,11 @@ class MockFrameReader(object):
     """
 
     @classmethod
-    def __init__(cls, self, stream=None):
+    def __init__(cls, self, stream=None, bytesInterval=None):
         self.stream = stream
+        self.bytesInterval = bytesInterval
+        self.bytes = 0
+        self._nextInterval = bytesInterval
 
     @classmethod
     def next(cls, self):
@@ -65,6 +70,7 @@ class DispatchTester(object):
     def __init__(self, test):
         self.test = test
         self.messages = []
+        self.intervals = []
 
     def dispatchMessage(self, *args):
         fod = getattr(self.test, 'failOnDispatch', False)
@@ -73,6 +79,9 @@ class DispatchTester(object):
             raise AssertionError('Message dispatched %r' % (args,))
 
         self.messages.append(args)
+
+    def bytesInterval(self, bytes):
+        self.intervals.append(bytes)
 
 
 class MockStream(object):
@@ -317,7 +326,8 @@ class DecoderTestCase(unittest.TestCase):
 
         self.dispatcher = DispatchTester(self)
         self.stream_factory = MockStreamFactory(self)
-        self.decoder = codec.Decoder(self.dispatcher, self.stream_factory)
+        self.decoder = codec.Decoder(self.dispatcher, self.stream_factory,
+            stream=BufferedByteStream(), bytesInterval=codec.BYTES_INTERVAL)
 
         self.expected_streams = None
         self.streams = {}
@@ -385,3 +395,30 @@ class DecoderTestCase(unittest.TestCase):
         self.assertEqual(self.decoder.next(), None)
 
         self.assertEqual(self.streams[2].timestamp, 5)
+
+
+class BytesIntervalTestCase(unittest.TestCase):
+    """
+    Tests to ensure that the dispatcher receives the correct notification
+    when a specified number of bytes has been read.
+    """
+
+    def setUp(self):
+        self.dispatcher = DispatchTester(self)
+        self.stream_factory = MockStreamFactory(self)
+        self.decoder = codec.Decoder(self.dispatcher, self.stream_factory,
+            stream=BufferedByteStream())
+
+    def getStream(self, streamId):
+        return MockStream()
+
+    def test_interval(self):
+        self.assertEqual(self.decoder.bytes, 0)
+        self.decoder.setBytesInterval(8)
+
+        self.decoder.send('\x03\x00\x00\x00\x00\x00\x00\r\x00\x00\x00\x00')
+
+        self.decoder.next()
+        self.assertEqual(self.decoder.bytes, 12)
+        self.assertEqual(self.dispatcher.intervals, [12])
+
