@@ -30,9 +30,6 @@ MIN_CHANNEL_ID = 3
 #:
 BYTES_INTERVAL = 0x131800
 
-#: A list of encoded headers
-_ENCODED_CONTINUATION_HEADERS = []
-
 
 class BaseError(Exception):
     """
@@ -115,21 +112,12 @@ class BaseChannel(object):
         @return: The previous header, if there is one.
         @rtype: L{header.Header} or C{None}
         """
-        old_header = self.header
-
-        if old_header is None:
-            if new.relative is True:
-                raise header.HeaderError(
-                    'Tried to set a relative header as absolute')
-
-        if not new.relative:
-            h = self.header = new
+        if self.header is None:
+            self.header = new
         else:
-            h = self.header = header.mergeHeaders(self.header, new)
+            self.header.merge(new)
 
-        self._bodyRemaining = h.bodyLength - self.bytes
-
-        return old_header
+        self._bodyRemaining = self.header.bodyLength - self.bytes
 
     def _adjustFrameRemaining(self, l):
         """
@@ -564,19 +552,10 @@ class ChannelMuxer(Codec):
         """
         h = self.nextHeaders.pop(channel, None)
 
-        if h is None:
-            if channel.channelId < 64:
-                self.stream.write(
-                    _ENCODED_CONTINUATION_HEADERS[channel.channelId])
-            else:
-                header.encodeHeader(self.stream, h)
-        else:
-            old_header = channel.setHeader(h)
+        if h:
+            h = channel.setHeader(h)
 
-            if old_header:
-                h = header.diffHeaders(old_header, h)
-
-            header.encodeHeader(self.stream, h)
+        header.encodeHeader(self.stream, channel.header, h)
 
     def flush(self):
         raise NotImplementedError
@@ -682,21 +661,3 @@ class Encoder(ChannelMuxer):
         if self.bytes >= self._nextInterval:
             self.dispatcher.bytesInterval(self.bytes)
             self._nextInterval += self.bytesInterval
-
-
-def build_header_continuations():
-    global _ENCODED_CONTINUATION_HEADERS
-
-    s = BufferedByteStream()
-
-    # only generate the first 64 as it is likely that is all we will ever need
-    for i in xrange(0, 64):
-        h = header.Header(i)
-
-        header.encodeHeader(s, h)
-
-        _ENCODED_CONTINUATION_HEADERS.append(s.getvalue())
-        s.consume()
-
-
-build_header_continuations()

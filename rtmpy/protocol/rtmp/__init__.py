@@ -18,25 +18,173 @@ into fixed size body chunks.
 """
 
 from twisted.python import log, failure
-from twisted.internet import protocol, task
+from twisted.internet import protocol, task, defer
+import pyamf
 from pyamf.util import BufferedByteStream
 
 from rtmpy.protocol import handshake, version
 from rtmpy.protocol.rtmp import message, codec
+from rtmpy import exc
 
 
 #: Maximum number of streams that can be active per RTMP stream
 MAX_STREAMS = 0xffff
 
 
+class RemoteCallFailed(failure.Failure):
+    """
+    """
+
+
 class Stream(object):
-    timestamp = 0
 
-    def __init__(self, protocol):
+    def __init__(self, protocol, streamId):
         self.protocol = protocol
+        self.streamId = streamId
 
-    def onInvoke(self, *args):
-        print 'invoke', args
+        self.timestamp = 0
+        self.lastInvokeId = -1
+        self.activeInvokes = {}
+
+    def reset(self):
+        # TODO: check active invokes and errback
+        self.timestamp = 0
+        self.lastInvokeId = -1
+        self.activeInvokes = {}
+
+    def sendStatus(self, code, *args, **kwargs):
+        """
+        Informs the peer of a change of status.
+        """
+        kwargs.setdefault('level', 'status')
+        kwargs['code'] = code
+
+        if not args:
+            args = (None,)
+
+        msg = message.Invoke('onStatus', 0, *list(args) + [kwargs])
+
+        self.sendMessage(msg)
+
+    def setTimestamp(self, timestamp, relative=True):
+        """
+        Sets the timestamp for this stream. The timestamp is measured in
+        milliseconds since an arbitrary epoch. This could be since the stream
+        started sending or receiving audio/video etc.
+
+        @param relative: Whether the supplied timestamp is relative to the
+            previous.
+        """
+        if relative:
+            self.timestamp += timestamp
+        else:
+            if timestamp < self.timestamp:
+                raise ValueError('Cannot set a negative timestamp')
+
+            self.timestamp = timestamp
+
+    def sendMessage(self, msg, whenDone=None):
+        """
+        Sends an RTMP message to the peer. This a low level method and is not
+        part of any public api. If its use is necessary then this is a bug.
+
+        @param msg: The RTMP message to be sent by this stream.
+        @type: L{message.Message}
+        @param whenDone: An optional callback that is fired once the complete
+            encoded RTMP message has been sent to the peer. This is not the same
+            as a U{defer.Deferred} instance. When called it receives no params.
+        """
+        self.protocol.sendMessage(self, msg, whenDone)
+
+    def _handleInvokeResponse(self, result, id_):
+        """
+        Called to handle the response to an invoked method
+        """
+        if id_ == 0:
+            return result
+
+        d = self.activeInvokes.pop(id_, None)
+
+        if d is None:
+            self.sendMessage(message.Invoke('_error', id_, None, {}))
+
+            raise RuntimeError('Missing activeInvoke for id %r' % (id_,))
+
+        def write_error(fail):
+            code = getattr(fail.type, 'code', 'NetConnection.Call.Failed')
+
+            msg = message.Invoke('_error', id_, None, {
+                'level': 'error',
+                'code': code,
+                'description': fail.getErrorMessage()
+            })
+
+            self.sendMessage(msg)
+
+            return fail
+
+        def write_result(result):
+            # need to figure out how to set the first param
+            msg = message.Invoke('_result', id_, None, result)
+
+            self.sendMessage(msg)
+
+            return result
+
+        d.addCallbacks(write_result, write_error)
+
+        return result
+
+    def onInvoke(self, name, id_, args, timestamp):
+        """
+        Called when an invoke message has been received from the peer. This
+        could be a request or a response depending on whether id_ is 'in use'.
+
+        @return: A deferred containing the result of the invoke call. This is
+            not strictly necessary but useful for testing purposes.
+        @retype: L{defer.Deferred}
+        """
+        d = self.activeInvokes.pop(id_, None)
+
+        if d:
+            # handle the response
+            if name == '_error':
+                d.errback(RemoteCallFailed(args))
+            elif name == '_result':
+                d.callback(*args)
+            else:
+                log.msg('Unhandled name for invoke response %r' % (name,))
+
+            return d
+
+        d = defer.Deferred()
+
+        # a request from the peer to call a local method
+        try:
+            func = self.getInvokableTarget(name)
+        except:
+            d.errback()
+            func = None
+
+        if len(args) == 1 and args[0] is None:
+            args = args[1:]
+
+        if func is None:
+            d.errback(exc.CallFailed('Unknown method %r' % (name,)))
+        else:
+            d = defer.maybeDeferred(func, *args)
+
+        if id_ > 0:
+            self.activeInvokes[id_] = d
+
+        d.addBoth(self._handleInvokeResponse, id_)
+
+        return d
+
+    def getInvokableTarget(self, name):
+        """
+        """
+        raise NotImplementedError
 
     def onNotify(self, *args):
         print 'notify', args
@@ -64,20 +212,97 @@ class Stream(object):
 
 
 class ControlStream(Stream):
+    """
+    A privileged stream that can send and receive control messages as well as
+    having greater integration with the underlying protocol
+
+    @ivar decoder: L{codec.Decoder} instance owned by the protocol.
+    @ivar encoder: L{codec.Encoder} instance owned by the protocol.
+    """
+
+    def __init__(self, protocol, streamId):
+        Stream.__init__(self, protocol, streamId)
+
+        self.decoder = self.protocol.decoder
+        self.encoder = self.protocol.encoder
+
     def onFrameSize(self, size, timestamp):
-        self.protocol.setFrameSize(size)
+        """
+        Called when the peer sets its RTMP frame size
 
-    def onDownstreamBandwidth(self, *args):
-        print 'dsbw', args
+        @param size: The new size of any RTMP frames sent from the peer.
+        @param timestamp: Time this message was received.
+        """
+        self.decoder.setFrameSize(size)
 
-    def onUpstreamBandwidth(self, *args):
-        print 'usbw', args
+    def onDownstreamBandwidth(self, bandwidth, timestamp):
+        """
+        """
 
-    def onControlMessage(self, *args):
-        print 'cm', args
+    def onUpstreamBandwidth(self, bandwidth, extra, timestamp):
+        """
+        """
 
-    def onBytesRead(self, *args):
-        print 'bytes-read', args
+    def onControlMessage(self, msg, timestamp):
+        """
+        """
+
+    def onBytesRead(self, bytes, timestamp):
+        """
+        """
+
+    def getInvokableTarget(self, name):
+        if name == 'createStream':
+            return self.createStream
+
+    def createStream(self):
+        return len(self.protocol.streams)
+
+
+class DecodingDispatcher(object):
+    """
+    A proxy class that listens for events fired from the L{codec.Decoder}
+
+    @param protocol: The L{RTMPProtocol} instance attached to the decoder.
+    """
+
+    def __init__(self, protocol):
+        self.protocol = protocol
+
+    def dispatchMessage(self, stream, datatype, timestamp, data):
+        """
+        Called when the RTMP decoder has read a complete RTMP message.
+
+        @param stream: The L{Stream} to receive this mesage.
+        @param datatype: The RTMP datatype for the message.
+        @param timestamp: The absolute timestamp this message was received.
+        @param data: The raw data for the message.
+        """
+        m = message.get_type_class(datatype)()
+
+        m.decode(BufferedByteStream(data))
+
+        m.dispatch(stream, timestamp)
+
+    def bytesInterval(self, bytes):
+        """
+        Called when a specified number of bytes has been read from the stream.
+        The RTMP protocol demands that we send an acknowledge message to the
+        peer. If we don't do this, Flash will stop streaming video/audio.
+        """
+        stream = self.protocol.getStream(0)
+
+        stream.sendMessage(message.BytesRead(self.protocol.decoder.bytes))
+
+
+class EncodingDispatcher(object):
+    """
+    TODO: Figure out if we need this class to listen to the bytesInterval for
+    encoding
+    """
+
+    def bytesInterval(self, bytes):
+        pass
 
 
 class RTMPProtocol(protocol.Protocol):
@@ -87,11 +312,14 @@ class RTMPProtocol(protocol.Protocol):
     @ivar state: The state of the protocol. Can be either C{HANDSHAKE} or
         C{STREAM}.
     @type state: C{str}
+    @ivar objectEncoding: The version to de/encode AMF packets. Set via the
+        connect packet.
     """
 
     HANDSHAKE = 'handshake'
     STREAM = 'stream'
 
+    objectEncoding = pyamf.AMF0
 
     def logAndDisconnect(self, reason, *args, **kwargs):
         """
@@ -132,21 +360,15 @@ class RTMPProtocol(protocol.Protocol):
                 self.application.clientDisconnected(self, reason)
 
             if hasattr(self, 'decoder_task'):
-                if self.decoder_task:
-                    self.decoder_task.pause()
-
                 del self.decoder_task
 
-            if hasattr(self, 'decoder') and self.decoder:
+            if hasattr(self, 'decoder'):
                 del self.decoder
 
             if hasattr(self, 'encoder_task'):
-                if self.encoder_task:
-                    self.encoder_task.pause()
-
                 del self.encoder_task
 
-            if hasattr(self, 'encoder') and self.encoder:
+            if hasattr(self, 'encoder'):
                 del self.encoder
 
     def _stream_dataReceived(self, data):
@@ -225,37 +447,42 @@ class RTMPProtocol(protocol.Protocol):
         self.streams = {}
         self.application = None
 
-        self.decoder = codec.Decoder(self, self)
-        self.encoder = codec.Encoder(self)
+        self.decoder = codec.Decoder(DecodingDispatcher(self), self)
+        self.encoder = codec.Encoder(self.transport, EncodingDispatcher())
 
         self.decoder_task = None
         self.encoder_task = None
 
     # IStreamFactory
     def getStream(self, streamId):
+        """
+        Returns the L{Stream} instance related to the C{streamId}.
+
+        An id of C{0} is special as it is considered the control stream.
+        """
         s = self.streams.get(streamId, None)
 
         if s is None:
             if streamId == 0:
                 s = self.factory.getControlStream(self, streamId)
             else:
-                s = Stream(self)
+                s = Stream(self, streamId)
 
             self.streams[streamId] = s
 
         return s
 
-    def dispatchMessage(self, stream, datatype, timestamp, data):
-        m = message.get_type_class(datatype)()
-
-        m.decode(BufferedByteStream(data))
-
-        m.dispatch(stream, timestamp)
-
     def sendMessage(self, stream, msg, whenDone=None):
         """
         Sends an RTMP message to the peer. Not part of a public api, use
         C{stream.sendMessage} instead.
+
+        @param stream: The stream instance that is sending the message.
+        @type stream: L{Stream}
+        @param msg: The message being sent to the peer.
+        @type msg: L{message.Message}
+        @param whenDone: A callback fired when the message has been written to
+            the RTMP stream. See L{Stream.sendMessage}
         """
         buf = BufferedByteStream()
 

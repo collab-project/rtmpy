@@ -12,13 +12,14 @@ __all__ = [
     'Header',
     'encodeHeader',
     'decodeHeader',
-    'diffHeaders',
-    'mergeHeaders'
 ]
 
 #: The header can come in one of four sizes: 12, 8, 4, or 1 byte(s).
 ENCODE_HEADER_SIZES = {12: 0, 8: 1, 4: 2, 1: 3}
 DECODE_HEADER_SIZES = [12, 8, 4, 1]
+
+#: A list of encoded headers
+_ENCODED_CONTINUATION_HEADERS = []
 
 
 class HeaderError(Exception):
@@ -44,15 +45,57 @@ class Header(object):
         self.bodyLength = bodyLength
         self.streamId = streamId
 
-    def _get_relative(self):
-        return None in [
-            self.streamId,
-            self.timestamp,
-            self.datatype,
-            self.bodyLength,
-        ]
+    def merge(self, other):
+        """
+        Merge the values from C{other} into this header.
 
-    relative = property(_get_relative)
+        @type other: L{Header}
+        """
+        if self is other:
+            return
+
+        if other.streamId is not None:
+            self.streamId = other.streamId
+
+        if other.datatype is not None:
+            self.datatype = other.datatype
+
+        if other.bodyLength is not None:
+            self.bodyLength = other.bodyLength
+
+        if other.timestamp is not None:
+            self.timestamp = other.timestamp
+
+    def diff(self, other):
+        """
+        Returns the number of bytes needed to de/encode the header based on the
+        differences between the two.
+
+        Both headers must be from the same channel.
+
+        @param other: The other header to compare.
+        @type old: L{Header}
+        """
+        if self is other:
+            return 1
+
+        if self.channelId != other.channelId:
+            raise HeaderError('channelId mismatch on diff self=%r, other=%r' % (
+                self, other))
+
+        if self.streamId != other.streamId:
+            return 12
+
+        if self.datatype != other.datatype:
+            return 8
+
+        if self.bodyLength != other.bodyLength:
+            return 4
+
+        if self.timestamp != other.timestamp:
+            return 4
+
+        return 1
 
     def __repr__(self):
         attrs = []
@@ -60,52 +103,13 @@ class Header(object):
         for k in self.__slots__:
             v = getattr(self, k, None)
 
-            if v is None:
-                continue
-
             attrs.append('%s=%r' % (k, v))
-
-        attrs.append('relative=%r' % (self.relative,))
 
         return '<%s.%s %s at 0x%x>' % (
             self.__class__.__module__,
             self.__class__.__name__,
             ' '.join(attrs),
             id(self))
-
-
-def getHeaderSize(header):
-    """
-    Returns the expected number of bytes it will take to encode C{header}.
-
-    @param header: An L{interfaces.IHeader} object.
-    @return: The number of bytes required to encode C{header}.
-    @rtype: C{int}
-    """
-    if header.channelId is None:
-        raise HeaderError('Header channelId cannot be None')
-
-    if header.streamId is not None:
-        if None in [header.bodyLength, header.datatype, header.timestamp]:
-            raise HeaderError('Dependant values unmet (got:%r)' % (
-                header,))
-
-        return 12
-
-    if [header.bodyLength, header.datatype] != [None, None]:
-        if header.timestamp is None:
-            raise HeaderError('Dependant values unmet (got:%r)' % (
-                header,))
-
-        return 8
-
-    if header.timestamp is not None:
-        # XXX : What should happen if header.streamId or header.datatype is
-        # set? Whilst not strictly an error, it could be the result of some
-        # corruption elsewhere.
-        return 4
-
-    return 1
 
 
 def encodeChannelId(stream, size, channelId):
@@ -135,7 +139,7 @@ def encodeChannelId(stream, size, channelId):
         stream.write_uchar(channelId >> 0x08)
 
 
-def encodeHeader(stream, header):
+def encodeHeader(stream, header, previous=None):
     """
     Encodes a RTMP header to C{stream}.
 
@@ -143,10 +147,19 @@ def encodeHeader(stream, header):
 
     @param stream: The stream to write the encoded header.
     @type stream: L{util.BufferedByteStream}
-    @param header: An I{interfaces.IHeader} object.
-    @raise TypeError: If L{interfaces.IHeader} is not provided by C{header}.
+    @param header: The L{Header} to encode.
+    @param previous: The previous header (if any).
     """
-    size = getHeaderSize(header)
+    if previous is None:
+        size = 12
+    else:
+        size = header.diff(previous)
+
+    if size == 1 and header.channelId < 64:
+        stream.write(_ENCODED_CONTINUATION_HEADERS[header.channelId])
+
+        return
+
     encodeChannelId(stream, size, header.channelId)
 
     if size >= 4:
@@ -226,97 +239,19 @@ def decodeHeader(stream):
     return header
 
 
-def diffHeaders(old, new):
-    """
-    Returns a header based on the differences between two headers. Both C{old}
-    and C{new} must implement L{interfaces.IHeader}, be from the same channel
-    and be absolute.
+def build_header_continuations():
+    global _ENCODED_CONTINUATION_HEADERS
 
-    @param old: The first header to compare.
-    @type old: L{interfaces.IHeader}
-    @param new: The second header to compare.
-    @type new: L{interfaces.IHeader}
-    @return: A header with the computed differences between old & new.
-    @rtype: L{Header}
-    """
-    if old.relative is not False:
-        raise HeaderError("Received a non-absolute header for old "
-            "(relative = %r)" % (old.relative))
+    from pyamf.util import BufferedByteStream
 
-    if new.relative is not False:
-        raise HeaderError("Received a non-absolute header for new "
-            "(relative = %r)" % (new.relative))
+    s = BufferedByteStream()
 
-    if old.channelId != new.channelId:
-        raise HeaderError("The two headers are not for the same channel")
+    # only generate the first 64 as it is likely that is all we will ever need
+    for i in xrange(0, 64):
+        encodeChannelId(s, 1, i)
 
-    diff = Header(channelId=old.channelId)
-
-    if new.timestamp != old.timestamp:
-        diff.timestamp = new.timestamp
-
-    if new.datatype != old.datatype:
-        diff.datatype = new.datatype
-
-    if new.bodyLength != old.bodyLength:
-        diff.bodyLength = new.bodyLength
-    elif diff.datatype is not None:
-        diff.bodyLength = old.bodyLength
-
-    if new.streamId != old.streamId:
-        diff.streamId = new.streamId
-
-    if diff.timestamp is None and diff.datatype is not None and diff.bodyLength is not None:
-        diff.timestamp = 0
-
-    return diff
+        _ENCODED_CONTINUATION_HEADERS.append(s.getvalue())
+        s.consume()
 
 
-def mergeHeaders(old, new):
-    """
-    Returns an absolute header that is the result of merging the values of
-    C{old} and C{new}. Both C{old} and C{new} must implement
-    L{interfaces.IHeader} and be from the same channel. Also, C{old} must be
-    absolute and C{new} must be relative.
-
-    @param old: The first header to compare.
-    @type old: L{interfaces.IHeader}
-    @param new: The second header to compare.
-    @type new: L{interfaces.IHeader}
-    @return: A header with the merged values of old & new.
-    @rtype: L{Header}
-    """
-    if old.relative is not False:
-        raise HeaderError("Received a non-absolute header for old "
-            "(relative = %r)" % (old.relative))
-
-    if new.relative is not True:
-        raise HeaderError("Received a non-relative header for new "
-            "(relative = %r)" % (new.relative))
-
-    if old.channelId != new.channelId:
-        raise HeaderError("The two headers are not for the same channel")
-
-    header = Header(old.channelId)
-
-    if new.timestamp is not None:
-        header.timestamp = new.timestamp
-    else:
-        header.timestamp = old.timestamp
-
-    if new.datatype is not None:
-        header.datatype = new.datatype
-    else:
-        header.datatype = old.datatype
-
-    if new.bodyLength is not None:
-        header.bodyLength = new.bodyLength
-    else:
-        header.bodyLength = old.bodyLength
-
-    if new.streamId is not None:
-        header.streamId = new.streamId
-    else:
-        header.streamId = old.streamId
-
-    return header
+build_header_continuations()
