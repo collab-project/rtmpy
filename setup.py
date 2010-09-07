@@ -3,11 +3,22 @@
 
 from ez_setup import use_setuptools
 
-use_setuptools()
+# 15 seconds is far too long ....
+use_setuptools(download_delay=3)
 
-import sys
+import sys, os.path
+
 from setuptools import setup, find_packages
 from setuptools.command import test
+
+
+# add the path of the folder this file lives in
+base_path = os.path.dirname(os.path.normpath(os.path.abspath(__file__)))
+
+# since the basedir is set as the first option in sys.path, this works
+sys.path.insert(0, base_path)
+
+readme = os.path.join(base_path, 'README.txt')
 
 
 class TestCommand(test.test):
@@ -39,31 +50,9 @@ def get_test_requirements():
 
 
 def get_version():
-    """
-    Gets the version number. Pulls it from the source files rather than
-    duplicating it.
-    """
-    import os.path
-    # we read the file instead of importing it as root sometimes does not
-    # have the cwd as part of the PYTHONPATH
+    from rtmpy import version
 
-    fn = os.path.join(os.path.dirname(__file__), 'rtmpy', '__init__.py')
-    lines = open(fn, 'rt').readlines()
-
-    version = None
-
-    for l in lines:
-        # include the ' =' as __version__ is a part of __all__
-        if l.startswith('__version__ =', ):
-            x = compile(l, fn, 'single')
-            eval(x)
-            version = locals()['__version__']
-            break
-
-    if version is None:
-        raise RuntimeError('Couldn\'t determine version number')
-
-    return '.'.join([str(x) for x in version])
+    return str(version)
 
 def get_install_requirements():
     """
@@ -85,7 +74,7 @@ flashplayer air actionscript decoder encoder gateway server"""
 setup(name = "RTMPy",
     version = get_version(),
     description = "Twisted protocol for RTMP",
-    long_description = open('README.txt', 'rt').read(),
+    long_description = open(readme, 'rt').read(),
     cmdclass = {
        'test': TestCommand
     },
