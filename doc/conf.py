@@ -39,9 +39,10 @@ source_suffix = '.rst'
 #source_encoding = 'utf-8-sig'
 
 # create content template for the homepage
-from util import rst2html, copy_file
+from shutil import copyfile
+from util import rst2html
 readme = rst2html('../README.txt', 'html/intro.html')
-readme = copy_file('../CHANGES.txt', 'changelog.rst')
+readme = copyfile('../CHANGES.txt', 'changelog.rst')
 
 # General information about the project.
 project = 'RTMPy'

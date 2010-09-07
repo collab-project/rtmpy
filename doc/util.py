@@ -26,18 +26,3 @@ def rst2html( input, output ):
     
     return body
 
-
-def copy_file( input, output ):
-    """
-    Copy file to folder.
-    
-    :param input: Path to source file
-    :type: `str`
-    :param output: Path to output file
-    :type: `str`
-    """
-    path = os.path.abspath(input)
-    file = open(path, 'r')
-    tmp = open(output, 'w')
-    tmp.write(file.read())
-    tmp.close()
