@@ -1,5 +1,5 @@
 # -*- test-case-name: rtmpy -*-
-
+#
 # Copyright (c) The RTMPy Project.
 # See LICENSE.txt for details.
 
@@ -13,10 +13,16 @@ U{RTMP<http://osflash.org/documentation/rtmp>}.
 
 @since: July 2007
 @status: Pre-Alpha
-@version: 0.1.0
 """
 
-__all__ = ['__version__']
+
+from pyamf import versions as v
+
+
+__all__ = [
+    '__version__',
+    'version'
+]
 
 #: RTMPy version number.
-__version__ = (0, 1, 0, 'pre')
+__version__ = version = v.Version(0, 1, 0, 'pre')
