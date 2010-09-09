@@ -1,9 +1,7 @@
 # Copyright (c) The RTMPy Project.
 # See LICENSE.txt for details.
 
-from ez_setup import use_setuptools
-
-# 15 seconds is far too long ....
+from distribute_setup import use_setuptools
 use_setuptools(download_delay=3)
 
 import sys, os.path
