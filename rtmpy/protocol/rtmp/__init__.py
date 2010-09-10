@@ -22,7 +22,6 @@ from twisted.internet import protocol, task, defer
 import pyamf
 from pyamf.util import BufferedByteStream
 
-from rtmpy.protocol import handshake, version
 from rtmpy.protocol.rtmp import message, codec
 from rtmpy import exc
 
@@ -34,6 +33,22 @@ MAX_STREAMS = 0xffff
 class RemoteCallFailed(failure.Failure):
     """
     """
+
+_reg = {}
+
+
+def expose(func):
+    if hasattr(func, '__call__'):
+        _reg[func.func_name] = func.func_name
+
+        return func
+
+    def decorator(f):
+        _reg[func] = f.func_name
+
+        return f
+
+    return decorator
 
 
 class Stream(object):
@@ -170,7 +185,8 @@ class Stream(object):
             args = args[1:]
 
         if func is None:
-            d.errback(exc.CallFailed('Unknown method %r' % (name,)))
+            if not d.called:
+                d.errback(exc.CallFailed('Unknown method %r' % (name,)))
         else:
             d = defer.maybeDeferred(func, *args)
 
@@ -184,7 +200,12 @@ class Stream(object):
     def getInvokableTarget(self, name):
         """
         """
-        raise NotImplementedError
+        func_name = _reg.get(name, None)
+
+        if not func_name:
+            return
+
+        return getattr(self, func_name)
 
     def onNotify(self, *args):
         print 'notify', args
@@ -210,6 +231,22 @@ class Stream(object):
     def onBytesRead(self, *args):
         raise NotImplementedError
 
+    @expose
+    def publish(self, name, *args):
+        c = self.protocol.getStream(0)
+        c.sendMessage(message.ControlMessage(0, 1,))
+
+        self.sendStatus('NetStream.Publish.Start',
+            description='stream1283853804683 is now published.',
+            clientid='CDAwMKFF')
+
+        print 'published'
+
+    @expose
+    def closeStream(self):
+        self.sendStatus('NetStream.Unpublish.Success',
+            description='stream1283853804683 is now unpublished.',
+            clientid='CDAwMKFF')
 
 class ControlStream(Stream):
     """
@@ -251,12 +288,13 @@ class ControlStream(Stream):
         """
         """
 
-    def getInvokableTarget(self, name):
-        if name == 'createStream':
-            return self.createStream
-
+    @expose
     def createStream(self):
         return len(self.protocol.streams)
+
+    @expose
+    def deleteStream(self, streamId, foo):
+        print streamId, foo
 
 
 class DecodingDispatcher(object):

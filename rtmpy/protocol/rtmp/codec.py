@@ -157,6 +157,14 @@ class BaseChannel(object):
 
         return ret
 
+    def setFrameSize(self, size):
+        """
+        """
+        if self.frameRemaining >= self.frameSize:
+            self.frameRemaining = size
+
+        self.frameSize = size
+
     def __repr__(self):
         s = []
         attrs = ['channelId', 'frameRemaining', 'bytes']
@@ -261,7 +269,7 @@ class Codec(object):
         self.frameSize = size
 
         for channel in self.channels.values():
-            channel.frameSize = size
+            channel.setFrameSize(size)
 
     def getChannel(self, channelId):
         """
@@ -337,22 +345,20 @@ class FrameReader(Codec):
             channel.setHeader(h)
 
             bytes = channel.marshallOneFrame()
-
-            complete = channel.complete
-
-            if complete:
-                channel.reset()
-
-            return bytes, complete, channel.header
         except IOError:
             self.stream.seek(pos, 0)
 
             if self.stream.at_eof():
                 self.stream.consume()
 
-                raise StopIteration
+            raise StopIteration
 
-            raise
+        complete = channel.complete
+
+        if complete:
+            channel.reset()
+
+        return bytes, complete, channel.header
 
     def __iter__(self):
         return self

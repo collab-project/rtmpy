@@ -12,14 +12,12 @@ generate/decode the packets) to determine if the packets are valid.
 @since: 0.1
 """
 
-import sys
 import time
 
 from zope.interface import implements, Interface, Attribute
 from pyamf.util import BufferedByteStream
 
-from rtmpy import util
-from rtmpy.protocol import interfaces, version
+from rtmpy.protocol import version
 
 
 HANDSHAKE_LENGTH = 1536
