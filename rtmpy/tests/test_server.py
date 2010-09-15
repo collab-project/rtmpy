@@ -7,7 +7,7 @@ from twisted.internet import defer, reactor, protocol
 from twisted.test.proto_helpers import StringTransport, StringIOWithoutClosing
 
 from rtmpy import server, exc
-from rtmpy.protocol.rtmp import message
+from rtmpy.protocol.rtmp import message, ExtraResult
 
 
 class SimpleApplication(object):
@@ -33,7 +33,7 @@ class SimpleApplication(object):
     def onConnect(self, client, **kwargs):
         return not self.reject
 
-    def connectionAccepted(self, client):
+    def acceptConnection(self, client):
         pass
 
 
@@ -268,16 +268,6 @@ class ServerFactoryTestCase(unittest.TestCase):
         self.protocol.connectionMade()
         self.protocol.handshakeSuccess('')
 
-    def test_controlstream(self):
-        """
-        L{getControlStream}
-        """
-        s = self.factory.getControlStream(self.protocol, 0)
-
-        self.assertIsInstance(s, server.ServerControlStream)
-
-        self.assertIdentical(s.protocol, self.protocol)
-
 
 class ConnectingTestCase(unittest.TestCase):
     """
@@ -406,7 +396,7 @@ class ConnectingTestCase(unittest.TestCase):
         def bork(*args):
             raise EnvironmentError('woot')
 
-        self.patch(self.protocol, 'onConnect', bork)
+        self.patch(self.protocol, '_onConnect', bork)
 
         d = self.connect({})
 
@@ -447,39 +437,31 @@ class ConnectingTestCase(unittest.TestCase):
         d = self.connect({'app': 'what'})
 
         def check_status(res):
-            self.assertEqual(res, {
+            self.assertIsInstance(res, ExtraResult)
+            self.assertEqual(res.extra, {
+                'capabilities': 31, 'fmsVer': 'FMS/3,5,1,516', 'mode': 1})
+            self.assertEqual(res.result, {
                 'code': 'NetConnection.Connect.Success',
                 'objectEncoding': 0,
-                'description': 'Connection succeeded.'
+                'description': 'Connection succeeded.',
+                'level': 'status'
             })
 
-            stream, msg, whenDone = self.messages.pop(0)
-
-            self.assertIdentical(stream, self.control)
-            self.assertEqual(whenDone, None)
+            msg, = self.messages.pop(0)
 
             self.assertMessage(msg, message.DOWNSTREAM_BANDWIDTH,
                 bandwidth=2500000L)
 
-            stream, msg, whenDone = self.messages.pop(0)
-
-            self.assertIdentical(stream, self.control)
-            self.assertEqual(whenDone, None)
+            msg, = self.messages.pop(0)
 
             self.assertMessage(msg, message.UPSTREAM_BANDWIDTH,
                 bandwidth=2500000L, extra=2)
 
-            stream, msg, whenDone = self.messages.pop(0)
-
-            self.assertIdentical(stream, self.control)
-            self.assertEqual(whenDone, None)
-
-            self.assertMessage(msg, message.CONTROL,
-                type=0, value1=0, value2=None, value3=None)
-
             self.assertEqual(self.messages, [])
 
         d.addCallback(check_status)
+
+        self.protocol.onDownstreamBandwidth(2000, 2)
 
         return d
 
@@ -489,7 +471,6 @@ class ConnectingTestCase(unittest.TestCase):
 
         d = self.connect({'app': 'what'})
 
-
         def check_status(res):
             self.assertEqual(res, {
                 'code': 'NetConnection.Connect.Rejected',
@@ -498,7 +479,6 @@ class ConnectingTestCase(unittest.TestCase):
             })
 
             self.assertEqual(self.messages, [])
-
 
         d.addCallback(check_status)
 
