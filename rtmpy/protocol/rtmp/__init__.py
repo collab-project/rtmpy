@@ -53,6 +53,20 @@ class RemoteCallFailed(failure.Failure):
 
 def expose(func):
     """
+    A decorator that provides an easy way to expose methods that the peer can
+    'call' via RTMP C{invoke} or C{notify} messages.
+
+    Example usage::
+
+        @expose
+        def someRemoteMethod(self, foo, bar):
+            pass
+
+        @expose('foo-bar')
+        def anotherExposedMethod(self, *args):
+            pass
+
+    If expose is called with no args, the function name is used.
     """
     if hasattr(func, '__call__'):
         _exposed_funcs[func.func_name] = func.func_name
@@ -97,15 +111,18 @@ class BaseStream(object):
         """
         Informs the peer of a change of status.
         """
-        kwargs.setdefault('level', 'status')
-        kwargs['code'] = code
+        if isinstance(code, status.Status):
+            kwargs = code.__dict__
+        else:
+            kwargs.setdefault('level', 'status')
+            kwargs['code'] = code
 
         if not args:
             args = (None,)
 
         msg = message.Invoke('onStatus', 0, *list(args) + [kwargs])
 
-        self.sendMessage(msg)
+        self.sendMessage(msg, whenDone=kwargs.get('whenDone', None))
 
     def setTimestamp(self, timestamp, relative=True):
         """
@@ -165,6 +182,34 @@ class BaseStream(object):
 
         return result
 
+    def _callExposedMethod(self, name, *args):
+        """
+        Returns a L{defer.Deferred} that will hold the result of the called
+        method.
+
+        @param name: The name of the method to call
+        @param args: The supplied args from the invoke/notify call.
+        """
+        d = defer.Deferred()
+
+        # a request from the peer to call a local method
+        try:
+            func = self.getInvokableTarget(name)
+        except:
+            d.errback()
+
+            return d
+
+        if len(args) >= 1 and args[0] is None:
+            args = args[1:]
+
+        if func is None:
+            d.errback(exc.CallFailed('Unknown method %r' % (name,)))
+        else:
+            d = defer.maybeDeferred(func, *args)
+
+        return d
+
     def onInvoke(self, name, id_, args, timestamp):
         """
         Called when an invoke message has been received from the peer. This
@@ -187,23 +232,7 @@ class BaseStream(object):
 
             return d
 
-        d = defer.Deferred()
-
-        # a request from the peer to call a local method
-        try:
-            func = self.getInvokableTarget(name)
-        except:
-            d.errback()
-            func = None
-
-        if len(args) == 1 and args[0] is None:
-            args = args[1:]
-
-        if func is None:
-            if not d.called:
-                d.errback(exc.CallFailed('Unknown method %r' % (name,)))
-        else:
-            d = defer.maybeDeferred(func, *args)
+        d = self._callExposedMethod(name, *args)
 
         if id_ > 0:
             self.activeInvokes[id_] = d
@@ -212,8 +241,25 @@ class BaseStream(object):
 
         return d
 
+    def onNotify(self, name, args, timestamp):
+        """
+        Call an exposed method on this peer but without regard to any return
+        value.
+
+        @param name: The name of the method to call
+        @param args: A list of arguments for this method.
+        @param timestamp: The timestamp at which this notify was called.
+        """
+        self._callExposedMethod(name, *args)
+
     def getInvokableTarget(self, name):
         """
+        Returns a callable based on the supplied name, or C{None} if not found.
+
+        This allows fine grained control over what this stream can expose to the
+        peer.
+
+        @param name: The name of the function to be mapped to a callable.
         """
         func_name = _exposed_funcs.get(name, None)
 
@@ -513,13 +559,12 @@ class RTMPProtocol(protocol.Protocol, BaseStream):
         return streamId
 
     @expose
-    def deleteStream(self, streamId, foo):
+    def deleteStream(self, streamId):
         """
         Deletes an existing L{NetStream} associated with this NetConnection.
 
         @todo: What about error handling or if the NetStream is still receiving
             or streaming data?
-        @todo: What is foo?
         """
         if streamId == 0:
             return # can't delete the NetConnection
