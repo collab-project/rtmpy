@@ -107,6 +107,25 @@ class BaseStream(object):
         self.lastInvokeId = -1
         self.activeInvokes = {}
 
+    def call(self, name, *args, **kwargs):
+        whenDone = kwargs.get('whenDone', None)
+
+        if not whenDone:
+            self.sendMessage(message.Notify(name, *args))
+
+            return
+
+        self.lastInvokeId += 1
+        invokeId = self.lastInvokeId
+
+        d = defer.Deferred()
+        m = message.Invoke(name, invokeId, *args)
+        self.activeInvokes[invokeId] = d
+
+        self.sendMessage(m, whenDone=whenDone)
+
+        return d
+
     def sendStatus(self, code, *args, **kwargs):
         """
         Informs the peer of a change of status.
@@ -367,6 +386,7 @@ class RTMPProtocol(protocol.Protocol, BaseStream):
     clientId = None
 
     def __init__(self):
+        # this protocol is the NetConnection
         BaseStream.__init__(self, 0)
 
     def logAndDisconnect(self, reason, *args, **kwargs):
@@ -545,6 +565,23 @@ class RTMPProtocol(protocol.Protocol, BaseStream):
 
         if not self.encoder_task:
             self._startEncoding()
+
+    def setFrameSize(self, size):
+        self.sendMessage(message.FrameSize(size))
+        self.encoder.setFrameSize(size)
+
+    def getStreamingChannel(self, stream):
+        """
+        """
+        self.setFrameSize(4096)
+
+        channel = self.encoder.aquireChannel()
+
+        if not channel:
+            # todo: make this better
+            raise RuntimeError('No streaming channel available')
+
+        return codec.StreamingChannel(channel, stream.streamId, self.transport)
 
     @expose
     def createStream(self):

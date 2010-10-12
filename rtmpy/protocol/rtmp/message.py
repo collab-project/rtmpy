@@ -1,4 +1,4 @@
-# Copyright (c) The RTMPy Project.
+# Copyright the RTMPy project.
 # See LICENSE.txt for details.
 
 """
@@ -604,8 +604,10 @@ class StreamingMessage(Message):
         """
         Decode a streaming message.
         """
-        if not buf.at_eof():
+        try:
             self.data = buf.read()
+        except IOError:
+            self.data = ''
 
     def encode(self, buf):
         """
@@ -632,8 +634,7 @@ class AudioData(StreamingMessage):
         """
         Dispatches the message to the listener.
         """
-        if self.data:
-            listener.onAudioData(self.data, timestamp)
+        listener.onAudioData(self.data, timestamp)
 
 
 class VideoData(StreamingMessage):
@@ -641,14 +642,13 @@ class VideoData(StreamingMessage):
     A message containing video data.
     """
 
-    RTMP_TYPE = AUDIO_DATA
+    RTMP_TYPE = VIDEO_DATA
 
     def dispatch(self, listener, timestamp):
         """
         Dispatches the message to the listener.
         """
-        if self.data:
-            return listener.onVideoData(self.data, timestamp)
+        return listener.onVideoData(self.data, timestamp)
 
 
 #: Map event types to event classes
