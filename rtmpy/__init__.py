@@ -16,13 +16,7 @@ U{RTMP<http://osflash.org/documentation/rtmp>}.
 """
 
 
-from pyamf import versions as v
-
-
-__all__ = [
-    '__version__',
-    'version'
-]
+__all__ = ['__version__']
 
 #: RTMPy version number.
-__version__ = version = v.Version(0, 1, 0, 'pre')
+__version__ = (0, 1)

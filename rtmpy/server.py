@@ -173,6 +173,9 @@ class Client(object):
         self.nc = nc
         self.id = None
 
+    def call(self, name, *args):
+        self.nc.call(name, *args)
+
 
 class NetStream(rtmp.NetStream):
     """
@@ -275,6 +278,13 @@ class NetStream(rtmp.NetStream):
 
         return d
 
+    def unpublish(self):
+        """
+        Called when the producer stream has gone away. Perform clean up here.
+        """
+        # todo inform the nc that the stream went away
+        self.sendStatus('NetStream.Play.UnpublishNotify')
+
     def onVideoData(self, data, timestamp):
         """
         Called when a video packet has been received from the peer.
@@ -332,7 +342,6 @@ class NetStream(rtmp.NetStream):
             self._videoChannel = self.nc.getStreamingChannel(self)
             self._videoChannel.setType(message.VIDEO_DATA)
 
-            print 'playing', res
             self.state = 'playing'
 
             # wtf
@@ -375,6 +384,10 @@ class NetStream(rtmp.NetStream):
     def audioDataReceived(self, data, timestamp):
         self._audioChannel.sendData(data, timestamp)
 
+    def deleteStream(self):
+        """
+        """
+
 
 class ServerProtocol(rtmp.RTMPProtocol):
     """
@@ -393,6 +406,30 @@ class ServerProtocol(rtmp.RTMPProtocol):
 
         self.connected = False
         self.application = None
+
+    def getInvokableTarget(self, name):
+        target = rtmp.RTMPProtocol.getInvokableTarget(self, name)
+
+        if target:
+            return target
+
+        # all client methods are publicly accessible
+        client = getattr(self, 'client', None)
+
+        if client:
+            target = getattr(client, name, None)
+
+            if target:
+                return target
+
+        application = getattr(self, 'application', None)
+
+        if application and hasattr(application.__class__, name):
+            # todo think about protecting some methods?
+            target = getattr(application, name, None)
+
+            if target:
+                return target
 
     @expose('connect')
     def onConnect(self, args):
@@ -525,6 +562,8 @@ class ServerProtocol(rtmp.RTMPProtocol):
         @param type_: Not quite sure of the significance of this yet - valid
             values appear to be 'live', 'append', 'record'.
         """
+        streamName = util.ParamedString(streamName)
+
         if not self.connected:
             raise exc.ConnectError('Cannot publish stream - not connected')
 
@@ -555,6 +594,8 @@ class ServerProtocol(rtmp.RTMPProtocol):
         @type stream: L{NetStream}
         @param streamName: The name of the stream being unpublished. Not used.
         """
+        self.application.unpublishStream(streamName, stream)
+
         return self.application.onUnpublish(self.client, stream)
 
     @expose
@@ -607,8 +648,6 @@ class StreamPublisher(object):
         """
         Adds a subscriber to this publisher.
         """
-        print 'adding subscriber', self.timestamp, subscriber
-
         self.subscribers[subscriber] = {
             'timestamp': self.timestamp
         }
@@ -689,6 +728,12 @@ class StreamPublisher(object):
     def stop(self):
         pass
 
+    def unpublish(self):
+        for a in self.subscribers:
+            a.unpublish()
+
+        self.subscribers = {}
+
 
 class Application(object):
     """
@@ -767,6 +812,19 @@ class Application(object):
             raise exc.BadNameError('%s is already used' % (name,))
 
         return publisher
+
+    def unpublishStream(self, name, stream):
+        try:
+            source = self.streams[name]
+        except KeyError:
+            raise exc.BadNameError('Unknown stream %r' % (name,))
+
+        if source.client.id != stream.client.id:
+            raise exc.StreamError('Unable to unpublish stream')
+
+        source.unpublish()
+
+        del self.streams[name]
 
     def addSubscriber(self, stream, subscriber):
         """

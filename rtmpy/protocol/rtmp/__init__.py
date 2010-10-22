@@ -316,6 +316,10 @@ class NetStream(BaseStream):
 
         self.nc = nc
 
+    @property
+    def client(self):
+        return self.nc.client
+
     def sendMessage(self, msg, whenDone=None):
         """
         Sends an RTMP message to the peer. This a low level method and is not
@@ -328,6 +332,12 @@ class NetStream(BaseStream):
             as a U{defer.Deferred} instance. When called it receives no params.
         """
         self.nc.sendMessage(msg, whenDone, stream=self)
+
+    def deleteStream(self):
+        """
+        Called when this stream has been deleted from the NetConnection. Use it
+        to clean up.
+        """
 
 
 class DecodingDispatcher(object):
@@ -427,13 +437,20 @@ class RTMPProtocol(protocol.Protocol, BaseStream):
         if self.state == self.HANDSHAKE:
             del_attr('handshaker')
         elif self.state == self.STREAM:
+            for streamId, stream in self.streams.copy().iteritems():
+                if stream is self:
+                    continue
+
+                stream.closeStream()
+                self.deleteStream(streamId)
+
+            del_attr('streams')
+
             del_attr('decoder_task')
             del_attr('decoder')
 
             del_attr('encoder_task')
             del_attr('encoder')
-
-            del_attr('streams')
 
     def _stream_dataReceived(self, data):
         try:
@@ -606,10 +623,10 @@ class RTMPProtocol(protocol.Protocol, BaseStream):
         if streamId == 0:
             return # can't delete the NetConnection
 
-        try:
-            del self.streams[streamId]
-        except KeyError:
-            pass
+        stream = self.streams.pop(streamId, None)
+
+        if stream:
+            stream.deleteStream()
 
     def onFrameSize(self, size, timestamp):
         """
