@@ -27,15 +27,18 @@ class Header(object):
     An RTMP Header. Holds contextual information for an RTMP Channel.
     """
 
-    __slots__ = ('streamId', 'datatype', 'timestamp', 'bodyLength', 'channelId')
+    __slots__ = ('streamId', 'datatype', 'timestamp', 'bodyLength',
+        'channelId', 'full', 'continuation')
 
     def __init__(self, channelId, timestamp=-1, datatype=-1,
-                 bodyLength=-1, streamId=-1):
+                 bodyLength=-1, streamId=-1, full=False, continuation=False):
         self.channelId = channelId
         self.timestamp = timestamp
         self.datatype = datatype
         self.bodyLength = bodyLength
         self.streamId = streamId
+        self.full = full
+        self.continuation = continuation
 
     def __repr__(self):
         attrs = []
@@ -77,7 +80,10 @@ def encode(stream, header, previous=None):
     if previous is None:
         size = 0
     else:
-        size = min_bytes_required(header, previous)
+        if header.continuation:
+            size = 0xc0
+        else:
+            size = min_bytes_required(header, previous)
 
     channelId = header.channelId
 
@@ -142,6 +148,8 @@ def decode(stream):
     header = Header(channelId)
 
     if bits == 3:
+        header.continuation = True
+
         return header
 
     header.timestamp = stream.read_24bit_uint()
@@ -155,6 +163,8 @@ def decode(stream):
         stream.endian = '<'
         header.streamId = stream.read_ulong()
         stream.endian = '!'
+
+        header.full = True
 
     if header.timestamp == 0xffffff:
         header.timestamp = stream.read_ulong()
@@ -174,6 +184,7 @@ def merge(old, new):
         raise HeaderError('channelId mismatch on merge old=%r, new=%r' % (
             old.channelId, new.channelId))
 
+    # what to do about full/continuation flags?
     merged = Header(new.channelId)
 
     if new.streamId != -1:
@@ -194,7 +205,7 @@ def merge(old, new):
     if new.timestamp != -1:
         merged.timestamp = new.timestamp
     else:
-        merged.timestamp = 0
+        merged.timestamp = old.timestamp
 
     return merged
 

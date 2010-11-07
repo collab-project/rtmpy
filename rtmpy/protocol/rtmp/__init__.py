@@ -107,6 +107,25 @@ class BaseStream(object):
         self.lastInvokeId = -1
         self.activeInvokes = {}
 
+    def call(self, name, *args, **kwargs):
+        whenDone = kwargs.get('whenDone', None)
+
+        if not whenDone:
+            self.sendMessage(message.Invoke(name, 0, None, *args))
+
+            return
+
+        self.lastInvokeId += 1
+        invokeId = self.lastInvokeId
+
+        d = defer.Deferred()
+        m = message.Invoke(name, invokeId, None, *args)
+        self.activeInvokes[invokeId] = d
+
+        self.sendMessage(m, whenDone=whenDone)
+
+        return d
+
     def sendStatus(self, code, *args, **kwargs):
         """
         Informs the peer of a change of status.
@@ -297,6 +316,10 @@ class NetStream(BaseStream):
 
         self.nc = nc
 
+    @property
+    def client(self):
+        return self.nc.client
+
     def sendMessage(self, msg, whenDone=None):
         """
         Sends an RTMP message to the peer. This a low level method and is not
@@ -309,6 +332,12 @@ class NetStream(BaseStream):
             as a U{defer.Deferred} instance. When called it receives no params.
         """
         self.nc.sendMessage(msg, whenDone, stream=self)
+
+    def deleteStream(self):
+        """
+        Called when this stream has been deleted from the NetConnection. Use it
+        to clean up.
+        """
 
 
 class DecodingDispatcher(object):
@@ -367,6 +396,7 @@ class RTMPProtocol(protocol.Protocol, BaseStream):
     clientId = None
 
     def __init__(self):
+        # this protocol is the NetConnection
         BaseStream.__init__(self, 0)
 
     def logAndDisconnect(self, reason, *args, **kwargs):
@@ -379,6 +409,9 @@ class RTMPProtocol(protocol.Protocol, BaseStream):
         self.transport.loseConnection()
 
         return reason
+
+    def closeStream(self):
+        pass
 
     def connectionMade(self):
         """
@@ -407,13 +440,22 @@ class RTMPProtocol(protocol.Protocol, BaseStream):
         if self.state == self.HANDSHAKE:
             del_attr('handshaker')
         elif self.state == self.STREAM:
+            for streamId, stream in self.streams.copy().iteritems():
+                if stream is self:
+                    continue
+
+                stream.closeStream()
+                self.deleteStream(streamId)
+
+            self.closeStream()
+
+            del_attr('streams')
+
             del_attr('decoder_task')
             del_attr('decoder')
 
             del_attr('encoder_task')
             del_attr('encoder')
-
-            del_attr('streams')
 
     def _stream_dataReceived(self, data):
         try:
@@ -530,6 +572,11 @@ class RTMPProtocol(protocol.Protocol, BaseStream):
         @param whenDone: A callback fired when the message has been written to
             the RTMP stream. See L{BaseStream.sendMessage}
         """
+        try:
+            e = self.encoder
+        except AttributeError:
+            return
+
         if stream is None:
             stream = self
 
@@ -540,11 +587,28 @@ class RTMPProtocol(protocol.Protocol, BaseStream):
         # fast enough and the penalty for setting up a new thread is too high.
         msg.encode(buf)
 
-        self.encoder.send(buf.getvalue(), msg.RTMP_TYPE, stream.streamId,
+        e.send(buf.getvalue(), msg.RTMP_TYPE, stream.streamId,
             stream.timestamp, whenDone)
 
-        if not self.encoder_task:
+        if e.active and not self.encoder_task:
             self._startEncoding()
+
+    def setFrameSize(self, size):
+        self.sendMessage(message.FrameSize(size))
+        self.encoder.setFrameSize(size)
+
+    def getStreamingChannel(self, stream):
+        """
+        """
+        self.setFrameSize(4096)
+
+        channel = self.encoder.aquireChannel()
+
+        if not channel:
+            # todo: make this better
+            raise RuntimeError('No streaming channel available')
+
+        return codec.StreamingChannel(channel, stream.streamId, self.transport)
 
     @expose
     def createStream(self):
@@ -569,10 +633,10 @@ class RTMPProtocol(protocol.Protocol, BaseStream):
         if streamId == 0:
             return # can't delete the NetConnection
 
-        try:
-            del self.streams[streamId]
-        except KeyError:
-            pass
+        stream = self.streams.pop(streamId, None)
+
+        if stream:
+            stream.deleteStream()
 
     def onFrameSize(self, size, timestamp):
         """

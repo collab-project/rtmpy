@@ -7,7 +7,7 @@ Server implementation.
 
 from zope.interface import Interface, Attribute, implements
 from twisted.internet import protocol, defer
-from twisted.python import failure
+from twisted.python import failure, log
 
 from rtmpy import util, exc, versions
 from rtmpy.protocol.rtmp import message, expose, status
@@ -123,6 +123,19 @@ class IPublishingStream(Interface):
     The name should be enough :)
     """
 
+    def started(self):
+        """
+        Publishing has now started (or resumed).
+        """
+
+    def stopped(self):
+        """
+        Publishing has been stopped/paused.
+
+        @todo: Distinguish between a paused/starved stream and a stream that has
+            gone away.
+        """
+
     def videoDataReceived(data, timestamp):
         """
         A video packet has been received from the publishing stream.
@@ -160,11 +173,15 @@ class Client(object):
         self.nc = nc
         self.id = None
 
+    def call(self, name, *args):
+        self.nc.call(name, *args)
+
 
 class NetStream(rtmp.NetStream):
     """
     A server side NetStream. Knows nothing of L{IApplication}s but interfaces
-    directly with the L{ServerProtocol} (which does).
+    directly with the L{ServerProtocol} (which does). A NetStream is dumb and
+    defers all logic to the L{NetConnection<ServerProtocol>}.
 
     @param state: The state of the NetStream. Right now the only valid values
         are C{None} and C{'publishing'}.
@@ -183,13 +200,24 @@ class NetStream(rtmp.NetStream):
         self.name = None
         self.publisher = None
 
-    def publishingStarted(self, name):
+    def publishingStarted(self, publisher, name):
         """
         Called when this NetStream has started publishing data from the
         connected peer.
         """
+        self.publisher = publisher
         self.name = name
         self.state = 'publishing'
+
+    @expose
+    def receiveAudio(self, audio):
+        """
+        """
+
+    @expose
+    def receiveVideo(self, video):
+        """
+        """
 
     @expose
     def publish(self, name, type_='live'):
@@ -250,6 +278,13 @@ class NetStream(rtmp.NetStream):
 
         return d
 
+    def unpublish(self):
+        """
+        Called when the producer stream has gone away. Perform clean up here.
+        """
+        # todo inform the nc that the stream went away
+        self.sendStatus('NetStream.Play.UnpublishNotify')
+
     def onVideoData(self, data, timestamp):
         """
         Called when a video packet has been received from the peer.
@@ -293,6 +328,66 @@ class NetStream(rtmp.NetStream):
         if func and name == 'onMetaData':
             func(meta)
 
+    @expose
+    def play(self, name, *args):
+        d = defer.maybeDeferred(self.nc.playStream, name, self, *args)
+
+        def cb(res):
+            """
+            The stream has started playing
+            """
+            self._audioChannel = self.nc.getStreamingChannel(self)
+            self._audioChannel.setType(message.AUDIO_DATA)
+
+            self._videoChannel = self.nc.getStreamingChannel(self)
+            self._videoChannel.setType(message.VIDEO_DATA)
+
+            self.state = 'playing'
+
+            # wtf
+            self.sendMessage(message.ControlMessage(4, 1))
+            self.sendMessage(message.ControlMessage(0, 1))
+
+            self.sendStatus('NetStream.Play.Reset',
+                description='Playing and resetting %s' % (name,),
+                clientid=self.nc.clientId)
+
+            self.sendStatus('NetStream.Play.Start',
+                description='Started playing %s' % (name,),
+                clientid=self.nc.clientId)
+
+            self.nc.call('onStatus', {'code': 'NetStream.Data.Start'})
+
+            return res
+
+        def eb(fail):
+            code = getattr(fail.value, 'code', 'NetStream.Play.Failed')
+            description = fail.getErrorMessage() or 'Internal Server Error'
+
+            self.sendStatus(status.error(code, description))
+
+            return fail
+
+        d.addErrback(eb)
+        d.addCallback(cb)
+
+        return d
+
+    def onMetaData(self, data):
+        """
+        """
+        self.call('onMetaData', data)
+
+    def videoDataReceived(self, data, timestamp):
+        self._videoChannel.sendData(data, timestamp)
+
+    def audioDataReceived(self, data, timestamp):
+        self._audioChannel.sendData(data, timestamp)
+
+    def deleteStream(self):
+        """
+        """
+
 
 class ServerProtocol(rtmp.RTMPProtocol):
     """
@@ -311,6 +406,30 @@ class ServerProtocol(rtmp.RTMPProtocol):
 
         self.connected = False
         self.application = None
+
+    def getInvokableTarget(self, name):
+        target = rtmp.RTMPProtocol.getInvokableTarget(self, name)
+
+        if target:
+            return target
+
+        # all client methods are publicly accessible
+        client = getattr(self, 'client', None)
+
+        if client:
+            target = getattr(client, name, None)
+
+            if target:
+                return target
+
+        application = getattr(self, 'application', None)
+
+        if application and hasattr(application.__class__, name):
+            # todo think about protecting some methods?
+            target = getattr(application, name, None)
+
+            if target:
+                return target
 
     @expose('connect')
     def onConnect(self, args):
@@ -443,6 +562,8 @@ class ServerProtocol(rtmp.RTMPProtocol):
         @param type_: Not quite sure of the significance of this yet - valid
             values appear to be 'live', 'append', 'record'.
         """
+        streamName = util.ParamedString(streamName)
+
         if not self.connected:
             raise exc.ConnectError('Cannot publish stream - not connected')
 
@@ -455,8 +576,8 @@ class ServerProtocol(rtmp.RTMPProtocol):
 
             @param publisher: L{StreamPublisher}
             """
-            stream.publisher = publisher
-            stream.publishingStarted(streamName)
+            stream.publishingStarted(publisher, streamName)
+            publisher.start()
             self.application.onPublish(self.client, stream)
 
             return publisher
@@ -473,7 +594,31 @@ class ServerProtocol(rtmp.RTMPProtocol):
         @type stream: L{NetStream}
         @param streamName: The name of the stream being unpublished. Not used.
         """
+        self.application.unpublishStream(streamName, stream)
+
         return self.application.onUnpublish(self.client, stream)
+
+    @expose
+    def releaseStream(self, name):
+        """
+        Called when the stream is released. Not sure about this one.
+        """
+
+    def closeStream(self):
+        if self.application:
+            self.application.disconnect(self.client)
+
+    def playStream(self, name, subscriber, *args):
+        """
+        """
+        try:
+            publisher = self.application.getStreamByName(name)
+        except:
+            raise exc.StreamNotFound('Unknown stream %r' % (name,))
+
+        publisher.addSubscriber(subscriber)
+
+        return publisher
 
 
 class StreamPublisher(object):
@@ -485,8 +630,7 @@ class StreamPublisher(object):
     @ivar stream: The publishing L{NetStream}
     @ivar client: The linked L{Client} object. Not used right now.
     @ivar subscribers: A list of subscribers that are listening to the stream.
-    @todo: Think about different subscribe times and how that will affect
-        relative timestamps.
+    @ivar
     """
 
     implements(IPublishingStream)
@@ -495,22 +639,38 @@ class StreamPublisher(object):
         self.stream = stream
         self.client = client
 
-        self.subscribers = []
+        self.subscribers = {}
+        self.meta = {}
+        self.timestamp = self.baseTimestamp = 0
+
+    def _updateTimestamp(self, timestamp):
+        """
+        """
+        if timestamp == 0:
+            self.baseTimestamp = self.timestamp
+
+            return self.timestamp
+
+        self.timestamp = self.baseTimestamp + timestamp
+
+        return self.timestamp
 
     def addSubscriber(self, subscriber):
         """
         Adds a subscriber to this publisher.
         """
-        self.subscribers.append(subscriber)
+        self.subscribers[subscriber] = {
+            'timestamp': self.timestamp
+        }
+
+        if self.meta:
+            subscriber.onMetaData(self.meta)
 
     def removeSubscriber(self, subscriber):
         """
         Removes the subscriber from this publisher.
         """
-        try:
-            self.subscribers.remove(subscriber)
-        except ValueError:
-            pass
+        self.subscribers.pop(subscriber)
 
     # events called by the stream
 
@@ -522,8 +682,22 @@ class StreamPublisher(object):
         @type data: C{str}
         @param timestamp: The timestamp at which this data was received.
         """
-        for a in self.subscribers:
-            a.videoDataReceived(data, timestamp)
+        timestamp = self._updateTimestamp(timestamp)
+
+        to_remove = []
+
+        for subscriber, context in self.subscribers.iteritems():
+            relTimestamp = timestamp - context['timestamp']
+
+            try:
+                subscriber.videoDataReceived(data, relTimestamp)
+            except:
+                log.err()
+                to_remove.append(subscriber)
+
+        if to_remove:
+            for subscriber in to_remove:
+                self.removeSubscriber(subscriber)
 
     def audioDataReceived(self, data, timestamp):
         """
@@ -533,15 +707,40 @@ class StreamPublisher(object):
         @type data: C{str}
         @param timestamp: The timestamp at which this data was received.
         """
-        for a in self.subscribers:
-            a.audioDataReceived(data, timestamp)
+        timestamp = self._updateTimestamp(timestamp)
+        to_remove = []
+
+        for subscriber, context in self.subscribers.iteritems():
+            try:
+                subscriber.audioDataReceived(data, timestamp - context['timestamp'])
+            except:
+                log.err()
+                to_remove.append(subscriber)
+
+        if to_remove:
+            for subscriber in to_remove:
+                self.removeSubscriber(subscriber)
 
     def onMetaData(self, data):
         """
         The meta data for the a/v stream has been updated.
         """
+        self.meta.update(data)
+
         for a in self.subscribers:
             a.onMetaData(data)
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+    def unpublish(self):
+        for a in self.subscribers:
+            a.unpublish()
+
+        self.subscribers = {}
 
 
 class Application(object):
@@ -556,6 +755,7 @@ class Application(object):
     def __init__(self):
         self.clients = {}
         self.streams = {}
+        self._streamingClients = {}
 
     def startup(self):
         """
@@ -567,6 +767,12 @@ class Application(object):
         Called when the application is closed.
         """
 
+    def getStreamByName(self, name):
+        """
+        """
+        return self.streams[name]
+
+
     def acceptConnection(self, client):
         """
         Called when this application has accepted the client connection.
@@ -577,6 +783,22 @@ class Application(object):
         """
         Removes the C{client} from this application.
         """
+        self.onDisconnect(client)
+
+        publisher = self._streamingClients.pop(client, None)
+
+        if publisher:
+            name = publisher.stream.name
+
+            try:
+                self.unpublishStream(publisher, name)
+            except exc.BadNameError:
+                pass
+            except:
+                log.err()
+
+            del self.streams[name]
+
         del self.clients[client.id]
 
         client.id = None
@@ -610,11 +832,28 @@ class Application(object):
         if publisher is None:
             # brand new publish
             publisher = self.streams[name] = StreamPublisher(stream, client)
+            self._streamingClients[client] = publisher
 
         if client.id != publisher.client.id:
             raise exc.BadNameError('%s is already used' % (name,))
 
         return publisher
+
+    def unpublishStream(self, name, stream):
+        try:
+            source = self.streams[name]
+        except KeyError:
+            raise exc.BadNameError('Unknown stream %r' % (name,))
+
+        if source.client.id != stream.client.id:
+            raise exc.BadNameError('Unable to unpublish stream')
+
+        try:
+            source.unpublish()
+        except:
+            log.err()
+
+        del self.streams[name]
 
     def addSubscriber(self, stream, subscriber):
         """
@@ -685,7 +924,6 @@ class Application(object):
         """
         Called when a client disconnects.
         """
-        self.disconnect(client)
 
 
 class ServerFactory(protocol.ServerFactory):
