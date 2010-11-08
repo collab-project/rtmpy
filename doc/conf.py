@@ -58,7 +58,7 @@ copyright = "Copyright &#169; 2007-%s The <a href='%s'>%s</a> Project. All right
 import rtmpy
 
 # The full version, including alpha/beta/rc tags.
-version = str(rtmpy.version)
+version = '.'.join([str(x) for x in rtmpy.__version__])
 
 # The short X.Y version.
 release = version[:3]
