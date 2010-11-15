@@ -55,10 +55,10 @@ copyright = "Copyright &#169; 2007-%s The <a href='%s'>%s</a> Project. All right
 
 # We look for the __init__.py file in the current RTMPy source tree
 # and replace the values accordingly.
-import rtmpy
+from rtmpy import __version__
 
 # The full version, including alpha/beta/rc tags.
-version = '.'.join([str(x) for x in rtmpy.__version__])
+version = '.'.join([str(x) for x in __version__])
 
 # The short X.Y version.
 release = version[:3]

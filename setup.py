@@ -48,9 +48,10 @@ def get_test_requirements():
 
 
 def get_version():
-    from rtmpy import version
+    from rtmpy import __version__
 
-    return str(version)
+    return '.'.join([str(x) for x in __version__])
+
 
 def get_install_requirements():
     """
