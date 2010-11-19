@@ -71,7 +71,7 @@ def get_install_requirements():
     Returns a list of dependencies for RTMPy to function correctly on the
     target platform.
     """
-    install_requires = ['Twisted>=2.5.0', 'PyAMF>=0.6,<=0.6b2']
+    install_requires = ['Twisted>=2.5.0', 'PyAMF>0.5.1']
 
     if sys.platform.startswith('win'):
         install_requires.append('PyWin32')
@@ -99,7 +99,7 @@ setup(name = "RTMPy",
     tests_require = get_test_requirements(),
     test_suite = "rtmpy.tests.get_suite",
     zip_safe = True,
-    license = "MIT License",
+    license = "LGPL 2.1 License",
     platforms = ["any"],
     classifiers = [
         "Development Status :: 2 - Pre-Alpha",
@@ -107,7 +107,7 @@ setup(name = "RTMPy",
         "Natural Language :: English",
         "Intended Audience :: Developers",
         "Intended Audience :: Information Technology",
-        "License :: OSI Approved :: MIT License",
+        "License :: OSI Approved :: GNU Library or Lesser General Public License (LGPL)",
         "Operating System :: OS Independent",
         "Programming Language :: Python",
         "Programming Language :: Python :: 2.4",

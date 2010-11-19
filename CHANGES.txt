@@ -11,7 +11,6 @@ versions of RTMPy.
 ------------------
 - Switched license from MIT to LGPLv2.1 (or newer) (Ticket:64)
 
-
 0.1 (2010-10-21)
 ----------------
 - Ability to publish and subscribe to live streams. Provide support for AMF0 and
