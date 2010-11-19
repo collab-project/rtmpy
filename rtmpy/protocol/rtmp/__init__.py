@@ -1,5 +1,17 @@
-# Copyright the RTMPy project.
-# See LICENSE.txt for details.
+# Copyright the RTMPy Project
+#
+# RTMPy is free software: you can redistribute it and/or modify it under the
+# terms of the GNU Lesser General Public License as published by the Free
+# Software Foundation, either version 2.1 of the License, or (at your option)
+# any later version.
+#
+# RTMPy is distributed in the hope that it will be useful, but WITHOUT ANY
+# WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+# FOR A PARTICULAR PURPOSE.  See the GNU Lesser General Public License for more
+# details.
+#
+# You should have received a copy of the GNU Lesser General Public License along
+# with RTMPy.  If not, see <http://www.gnu.org/licenses/>.
 
 """
 RTMP implementation.
@@ -126,22 +138,26 @@ class BaseStream(object):
 
         return d
 
-    def sendStatus(self, code, *args, **kwargs):
+    def sendStatus(self, code_or_status, command=None, **kwargs):
         """
         Informs the peer of a change of status.
+
+        @param code_or_status: A status message or L{status.Status} instance.
+            If a string is supplied it will be converted to an L{status.Status}.
+        @param command: The command object part of the L{message.Invoke}
+            message. Not quite sure what this achieves right now. Defaults to
+            L{None}.
+        @param kwargs: If a string status message is supplied then any extra
+            kwargs will form part of the generated L{status.Status} message.
         """
-        if isinstance(code, status.Status):
-            kwargs = code.__dict__
+        if isinstance(code_or_status, status.Status):
+            status_obj = code_or_status
         else:
-            kwargs.setdefault('level', 'status')
-            kwargs['code'] = code
+            status_obj = status.status(code_or_status, **kwargs)
 
-        if not args:
-            args = (None,)
+        msg = message.Invoke('onStatus', 0, *[command, status_obj])
 
-        msg = message.Invoke('onStatus', 0, *list(args) + [kwargs])
-
-        self.sendMessage(msg, whenDone=kwargs.get('whenDone', None))
+        self.sendMessage(msg)
 
     def setTimestamp(self, timestamp, relative=True):
         """

@@ -1,7 +1,19 @@
 # -*- test-case-name: rtmpy.tests.test_util -*-
+
+# Copyright the RTMPy Project
 #
-# Copyright (c) The RTMPy Project.
-# See LICENSE.txt for details.
+# RTMPy is free software: you can redistribute it and/or modify it under the
+# terms of the GNU Lesser General Public License as published by the Free
+# Software Foundation, either version 2.1 of the License, or (at your option)
+# any later version.
+#
+# RTMPy is distributed in the hope that it will be useful, but WITHOUT ANY
+# WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+# FOR A PARTICULAR PURPOSE.  See the GNU Lesser General Public License for more
+# details.
+#
+# You should have received a copy of the GNU Lesser General Public License along
+# with RTMPy.  If not, see <http://www.gnu.org/licenses/>.
 
 """
 RTMPy Utilities.
@@ -13,21 +25,37 @@ import os.path
 import sys
 import time
 import random
-import urlparse
+from urlparse import urlparse
 
+try:
+    from urlparse import parse_qs
+except ImportError:
+    # support for Python2.4
+    from cgi import parse_qs
 
 from pyamf.util import BufferedByteStream
 
 
+
 class ParamedString(unicode):
     """
-    Names of streams can have url query strings attached as additional parameters.
+    Names of streams can have url query strings attached as additional
+    parameters.
 
-    This class
+    An example::
+
+        >>> q = ParamedString('foobar?spam=eggs&multi=baz&multi=gak')
+        >>> q == 'foobar'
+        True
+        >>> q.spam
+        'eggs'
+        >>> q.multi
+        ['baz', 'gak']
     """
 
+
     def __new__(cls, name):
-        result = urlparse.urlparse(name)
+        result = urlparse(name)
 
         x = unicode.__new__(cls, result[2])
 
@@ -35,8 +63,10 @@ class ParamedString(unicode):
 
         return x
 
+
     def _set_query(self, qs):
-        unicode.__setattr__(self, '_query', urlparse.parse_qs(qs))
+        unicode.__setattr__(self, '_query', parse_qs(qs))
+
 
     def __getattr__(self, name):
         try:
@@ -48,6 +78,7 @@ class ParamedString(unicode):
             return value[0]
 
         return value
+
 
     def __setattr__(self, name, value):
         self._query[name] = value
