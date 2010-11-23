@@ -17,7 +17,6 @@
 """
 
 from twisted.trial import unittest
-from twisted.python import failure
 from twisted.internet import defer, reactor, protocol
 from twisted.test.proto_helpers import StringTransport, StringIOWithoutClosing
 
@@ -535,3 +534,58 @@ class ConnectingTestCase(unittest.TestCase):
         d.addCallback(check_status)
 
         return d
+
+
+class TestRuntimeError(RuntimeError):
+    pass
+
+
+class ApplicationInterfaceTestCase(ServerFactoryTestCase):
+    """
+    Tests for L{server.ServerProtocol} implementing the L{server.IApplication}
+    interface correctly.
+    """
+
+    def setUp(self):
+        ServerFactoryTestCase.setUp(self)
+
+        self.app = server.Application()
+        self.client = self.app.buildClient(self.protocol)
+        self.app.acceptConnection(self.client)
+
+        return self.factory.registerApplication('foo', self.app)
+
+    def test_onDisconnect(self):
+        """
+        Ensure that C{onDisconnect} is called when calling C{app.disconnect}
+        """
+        self.executed = False
+
+        def foo(client):
+            self.assertIdentical(self.client, client)
+            self.executed = True
+
+        self.app.onDisconnect = foo
+
+        self.app.disconnect(self.client)
+
+        self.assertTrue(self.executed)
+
+    def test_onDisconnect_error(self):
+        """
+        Ensure that if onDisconnect raises an error, that execution continues
+        smoothly.
+        """
+        self.executed = False
+
+        def foo(client):
+            self.executed = True
+
+            raise TestRuntimeError('Die!!')
+
+        self.app.onDisconnect = foo
+
+        self.app.disconnect(self.client)
+
+        self.assertTrue(self.executed)
+        self.flushLoggedErrors(TestRuntimeError)
