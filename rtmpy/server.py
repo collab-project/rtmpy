@@ -994,6 +994,7 @@ class ServerFactory(protocol.ServerFactory):
             player will use when connecting to this server. An example::
 
             RTMP uri: http://appserver.mydomain.com/webApp; name: webApp.
+
         @param app: The L{IApplication} object that will interact with the
             RTMP clients.
         @return: A deferred signalling the completion of the registration
@@ -1037,12 +1038,10 @@ class ServerFactory(protocol.ServerFactory):
         @return: A L{defer.Deferred} when the process is complete. The result
             will be the application instance that was successfully unregistered.
         """
-        try:
-            app = self._pendingApplications.pop(name)
+        app = self._pendingApplications.pop(name, None)
 
+        if app is not None:
             return defer.succeed(app)
-        except KeyError:
-            pass
 
         try:
             app = self.applications[name]
