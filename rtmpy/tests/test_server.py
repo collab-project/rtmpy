@@ -18,7 +18,7 @@
 
 from twisted.trial import unittest
 from twisted.internet import defer, reactor, protocol
-from twisted.test.proto_helpers import StringTransport, StringIOWithoutClosing
+from twisted.test.proto_helpers import StringTransportWithDisconnection, StringIOWithoutClosing
 
 from rtmpy import server, exc
 from rtmpy.protocol.rtmp import message, ExtraResult
@@ -302,9 +302,38 @@ class ServerFactoryTestCase(unittest.TestCase):
     def setUp(self):
         self.factory = server.ServerFactory()
         self.protocol = self.factory.buildProtocol(None)
+        self.transport = StringTransportWithDisconnection()
+        self.protocol.transport = self.transport
+        self.transport.protocol = self.protocol
 
         self.protocol.connectionMade()
         self.protocol.handshakeSuccess('')
+
+
+    def connect(self, app, protocol):
+        client = app.buildClient(self.protocol)
+
+        app.acceptConnection(client)
+
+        protocol.connected = True
+        protocol.client = client
+        protocol.application = app
+
+        return client
+
+    def createStream(self, protocol):
+        """
+        Returns the L{server.NetStream} as created by the protocol
+        """
+        return protocol.getStream(protocol.createStream())
+
+        def capture_status(s):
+            self.stream_status[stream] = s
+
+        stream.sendStatus = capture_status
+
+        return stream
+
 
 
 class ConnectingTestCase(unittest.TestCase):
@@ -334,6 +363,7 @@ class ConnectingTestCase(unittest.TestCase):
 
         self.control = self.protocol.getStream(0)
 
+
     def assertStatus(self, code=None, description=None, level='status'):
         """
         Ensures that a status message has been sent.
@@ -360,6 +390,7 @@ class ConnectingTestCase(unittest.TestCase):
 
         self.assertEqual(args['level'], level)
 
+
     def assertErrorStatus(self, code=None, description=None):
         """
         Ensures that a status message has been sent.
@@ -371,6 +402,7 @@ class ConnectingTestCase(unittest.TestCase):
             description = 'Internal Server Error'
 
         self.assertStatus(code, description, 'error')
+
 
     def assertMessage(self, msg, type_, **state):
         """
@@ -420,7 +452,8 @@ class ConnectingTestCase(unittest.TestCase):
             self.assertEqual(res, {
                 'code': 'NetConnection.Connect.Failed',
                 'description': "Bad connect packet (missing 'app' key)",
-                'level': 'error'
+                'level': 'error',
+                'objectEncoding': 0
             })
 
         d.addCallback(cb)
@@ -442,7 +475,8 @@ class ConnectingTestCase(unittest.TestCase):
             self.assertEqual(res, {
                 'code': 'NetConnection.Connect.Failed',
                 'description': 'woot',
-                'level': 'error'
+                'level': 'error',
+                'objectEncoding': 0
             })
 
 
@@ -459,7 +493,8 @@ class ConnectingTestCase(unittest.TestCase):
             self.assertEqual(res, {
                 'code': 'NetConnection.Connect.InvalidApp',
                 'description': "Unknown application 'what'",
-                'level': 'error'
+                'level': 'error',
+                'objectEncoding': 0
             })
 
         d.addCallback(cb)
@@ -519,7 +554,8 @@ class ConnectingTestCase(unittest.TestCase):
             self.assertEqual(res, {
                 'code': 'NetConnection.Connect.Rejected',
                 'level': 'error',
-                'description': 'Authorization is required'
+                'description': 'Authorization is required',
+                'objectEncoding': 0
             })
 
             self.assertEqual(self.messages, [])
@@ -589,3 +625,190 @@ class ApplicationInterfaceTestCase(ServerFactoryTestCase):
 
         self.assertTrue(self.executed)
         self.flushLoggedErrors(TestRuntimeError)
+
+
+class PublishingTestCase(ServerFactoryTestCase):
+    """
+    Tests for all facets of publishing a stream
+    """
+
+    def setUp(self):
+        ServerFactoryTestCase.setUp(self)
+
+        self.stream_status = {}
+
+        self.app = server.Application()
+
+        return self.factory.registerApplication('foo', self.app)
+
+
+    def createStream(self):
+        """
+        Returns the L{server.NetStream} as created by the protocol
+        """
+        stream = self.protocol.getStream(self.protocol.createStream())
+
+        def capture_status(s):
+            self.stream_status[stream] = s
+
+        stream.sendStatus = capture_status
+
+        return stream
+
+
+    def assertStatus(self, stream, s):
+        self.assertEqual(self.stream_status[stream], s)
+
+
+    def test_publish(self):
+        """
+        Test app, client and protocol state on a successful first time publish
+        """
+        self.client = self.connect(self.app, self.protocol)
+
+        s = self.createStream()
+
+        d = s.publish('foo')
+
+        def cb(result):
+            # app
+            self.assertIdentical(result, self.app.streams['foo'])
+
+            # stream
+            self.assertIdentical(s.publisher, result)
+            self.assertEqual(s.state, 'publishing')
+
+            # result
+            self.assertIdentical(result.stream, s)
+            self.assertIdentical(result.client, self.client)
+            self.assertEqual(result.subscribers, {})
+            self.assertEqual(result.timestamp, 0)
+
+            # rtmp status
+            self.assertStatus(s, {
+                'code': 'NetStream.Publish.Start',
+                'description': 'foo is now published.',
+                'clientid': self.client.id,
+                'level': 'status'
+            })
+
+
+        return d.addCallback(cb)
+
+
+    def test_not_connected(self):
+        """
+        Test when
+        """
+        s = self.createStream()
+
+        self.assertFalse(self.protocol.connected)
+
+        d = s.publish('foo')
+
+        def eb(f):
+            x = f.trap(exc.ConnectError)
+
+            self.assertEqual(f.getErrorMessage(), 'Cannot publish stream - not connected')
+
+            self.assertStatus(s, {
+                'code': 'NetConnection.Call.Failed',
+                'description': 'Cannot publish stream - not connected',
+                'level': 'error'
+            })
+
+        return d.addErrback(eb)
+
+
+    def test_kill_connection_after_successful_publish(self):
+        """
+        After a successful publish, the peer disconnects rudely. Check app state
+        """
+        self.client = self.connect(self.app, self.protocol)
+        s = self.createStream()
+
+        d = s.publish('foo')
+
+        def kill_connection(result):
+            self.transport.loseConnection()
+
+            self.assertEqual(self.app.streams, {})
+            self.assertEqual(self.app.clients, {})
+
+            self.assertStatus(s, {
+                'code': 'NetStream.Unpublish.Success',
+                'description': u'foo is now unpublished.',
+                'clientid': self.client.id,
+                'level': 'status'
+            })
+
+        d.addCallback(kill_connection)
+
+        return d
+
+
+class PlayTestCase(ServerFactoryTestCase):
+    """
+    Tests for L{NetStream.play}
+    """
+
+
+    def setUp(self):
+        ServerFactoryTestCase.setUp(self)
+
+        self.app = server.Application()
+
+        return self.factory.registerApplication('foo', self.app)
+
+
+    def test_pending(self):
+        """
+        Test if the stream does not exist, the play command is put in a
+        suspended state, until a stream with the right name is published.
+        """
+        client = self.connect(self.app, self.protocol)
+
+        s = self.createStream(self.protocol)
+
+        self.assertFalse('foo' in self.app.streams)
+
+        d = s.play('foo')
+
+        self.assertFalse(d.called)
+
+        def cb(res):
+            self.assertTrue('foo' in self.app.streams)
+
+            self.assertTrue(s in res.subscribers)
+
+        from twisted.internet import reactor
+
+        reactor.callLater(0, self.app.publishStream, client, s, 'foo')
+
+        d.addCallback(cb)
+
+        return d
+
+    def test_existing(self):
+        """
+        Test if the stream does already exist, the play command is immediately
+        completed.
+        """
+        client = self.connect(self.app, self.protocol)
+
+        s = self.createStream(self.protocol)
+
+        self.assertFalse('foo' in self.app.streams)
+
+        self.app.publishStream(client, s, 'foo')
+
+        d = s.play('foo')
+
+        self.assertTrue(d.called)
+
+        def cb(res):
+            self.assertTrue(s in res.subscribers)
+
+        d.addCallback(cb)
+
+        return d
