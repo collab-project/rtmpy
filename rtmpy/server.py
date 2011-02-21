@@ -70,9 +70,14 @@ class IApplication(Interface):
         called when the disconnection was successful.
         """
 
-    def buildClient(protocol, **kwargs):
+    def buildClient(protocol, params, *args):
         """
         Returns a client object linked to the protocol object.
+
+        @param params: The connection parameters sent from the client, this
+            includes items such as the connection url, and user agent
+        @type params: C{dict}
+        @param args: The client supplied arguments to NetConnection.connect()
         """
 
     # events
@@ -88,7 +93,7 @@ class IApplication(Interface):
         @todo - implement this feature
         """
 
-    def onConnect(client):
+    def onConnect(client, *args):
         """
         Called when the peer connects to an application (NetConnection.connect).
 
@@ -100,20 +105,23 @@ class IApplication(Interface):
         otherwise L{rejectConnection}.
 
         @param client: The client object built by L{buildClient}
+        @param args: The client supplied arguments to NetConnection.connect()
         """
 
-    def onConnectAccept(client):
+    def onConnectAccept(client, *args):
         """
         Called when the peer has been successfully connected to this application.
 
         @param client: The client object built by L{buildClient}
+        @param args: The client supplied arguments to NetConnection.connect()
         """
 
-    def onConnectReject(client, reason):
+    def onConnectReject(client, reason, *args):
         """
         Called when the application has rejected the peers connection attempt.
 
         @param client: The client object built by L{buildClient}
+        @param args: The client supplied arguments to NetConnection.connect()
         """
 
     def onDisconnect(client):
@@ -456,7 +464,7 @@ class ServerProtocol(rtmp.RTMPProtocol):
 
 
     @expose('connect')
-    def onConnect(self, args):
+    def onConnect(self, params, *args):
         """
         Connects this protocol instance to an application. The application has
         the power to reject the connection (see L{Application.rejectConnection})
@@ -464,6 +472,11 @@ class ServerProtocol(rtmp.RTMPProtocol):
         Will return a L{defer.Deferred} that will contain the result of the
         connection request. The return is paused until the peer has sent its
         bandwidth negotiation packets. See L{onDownstreamBandwidth}.
+
+        @param params: The connection parameters sent from the client, this
+            includes items such as the connection url, and user agent
+        @type params: C{dict}
+        @param args: The client supplied arguments to NetConnection.connect()
         """
         if self.connected:
             # todo: error and disconnect here.
@@ -474,9 +487,9 @@ class ServerProtocol(rtmp.RTMPProtocol):
             Called when the application has accepted the connection
             (in principle)
             """
-            oE = args.pop('objectEncoding', self.objectEncoding)
+            oe = params.pop('objectEncoding', self.objectEncoding)
 
-            self.objectEncoding = oE
+            self.objectEncoding = oe
 
             f = self.factory
 
@@ -506,13 +519,13 @@ class ServerProtocol(rtmp.RTMPProtocol):
             validate the connection request.
             """
             if self.application and self.client:
-                self.application.onConnectReject(self.client, fail)
+                self.application.onConnectReject(self.client, fail, *args)
 
             code = getattr(fail.value, 'code', 'NetConnection.Connect.Failed')
             description = fail.getErrorMessage() or 'Internal Server Error'
 
             return status.error(code, description,
-                objectEncoding=args.pop('objectEncoding', self.objectEncoding))
+                objectEncoding=params.pop('objectEncoding', self.objectEncoding))
 
         def chain_errback(f):
             self._pendingConnection.errback(f)
@@ -521,7 +534,7 @@ class ServerProtocol(rtmp.RTMPProtocol):
 
         self._pendingConnection.addCallbacks(return_success, eb)
 
-        d = defer.maybeDeferred(self._onConnect, *(args,))
+        d = defer.maybeDeferred(self._onConnect, params, *args)
 
         d.addCallback(connection_accepted)
         d.addErrback(chain_errback)
@@ -529,9 +542,13 @@ class ServerProtocol(rtmp.RTMPProtocol):
         # todo: timeout for connection
         return self._pendingConnection
 
-    def _onConnect(self, args):
+    def _onConnect(self, params, *args):
         """
         The business logic of connecting to the application.
+
+        @param params: The connection parameters sent from the client, this
+            includes items such as the connection url, and user agent
+        @type params: C{dict}
         """
         if self.application:
             # This protocol has already successfully completed a connection
@@ -539,7 +556,7 @@ class ServerProtocol(rtmp.RTMPProtocol):
             raise exc.ConnectFailed('Already connected.')
 
         try:
-            appName = args['app']
+            appName = params['app']
         except KeyError:
             raise exc.ConnectFailed("Bad connect packet (missing 'app' key)")
 
@@ -548,7 +565,7 @@ class ServerProtocol(rtmp.RTMPProtocol):
         if self.application is None:
             raise exc.InvalidApplication('Unknown application %r' % (appName,))
 
-        self.client = self.application.buildClient(self, **args)
+        self.client = self.application.buildClient(self, params, *args)
 
         def cb(res):
             """
@@ -559,9 +576,9 @@ class ServerProtocol(rtmp.RTMPProtocol):
                 raise exc.ConnectRejected('Authorization is required')
 
             self.application.acceptConnection(self.client)
-            self.application.onConnectAccept(self.client)
+            self.application.onConnectAccept(self.client, *args)
 
-        d = defer.maybeDeferred(self.application.onConnect, self.client, **args)
+        d = defer.maybeDeferred(self.application.onConnect, self.client, *args)
 
         d.addCallback(cb)
 
@@ -852,13 +869,16 @@ class Application(object):
             log.err()
 
 
-    def buildClient(self, protocol, **kwargs):
+    def buildClient(self, protocol, params, *args):
         """
         Create an instance of a subclass of L{Client}. Override this method to
         alter how L{Client} instances are created.
 
         @param protocol: The L{rtmp.ServerProtocol} instance.
-        @param kwargs: A dict of arguments passed with the connect request.
+        @param params: The connection parameters sent from the client, this
+            includes items such as the connection url, and user agent
+        @type params: C{dict}
+        @param args: The client supplied arguments to NetConnection.connect()
         """
         c = self.client(protocol)
 
@@ -975,7 +995,7 @@ class Application(object):
         Called when the application is ready to connect clients
         """
 
-    def onConnect(self, client, **args):
+    def onConnect(self, client, *args):
         """
         Called when a connection request is made to this application. Must
         return a C{bool} (or a L{defer.Deferred} returning a C{bool}) which
@@ -988,7 +1008,7 @@ class Application(object):
         @type client: An instance of L{client_class}.
         """
 
-    def onConnectAccept(self, client, **kwargs):
+    def onConnectAccept(self, client, *args):
         """
         Called when the peer has successfully been connected to this
         application.
@@ -998,13 +1018,14 @@ class Application(object):
             connect request.
         """
 
-    def onConnectReject(self, client, reason):
+    def onConnectReject(self, client, reason, *args):
         """
         Called when a connection request has been rejected.
 
         @param client: The L{Client} object representing the peer.
         @param reason: A L{failure.Failure} object representing the reason why
             the client was rejected.
+        @param args: The client supplied arguments to NetConnection.connect()
         """
 
     def onPublish(self, client, stream):

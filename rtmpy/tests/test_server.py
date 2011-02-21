@@ -58,21 +58,21 @@ class SimpleApplication(object):
         return self.client
 
     def onConnect(self, *args, **kwargs):
-        self._add_event('connect', args, kwargs)
+        self._add_event('on-connect', args, kwargs)
 
         return not self.reject
 
     def onConnectAccept(self, *args, **kwargs):
-        self._add_event('connect-accept', args, kwargs)
+        self._add_event('on-connect-accept', args, kwargs)
 
     def onConnectReject(self, *args, **kwargs):
-        self._add_event('connect-reject', args, kwargs)
+        self._add_event('on-connect-reject', args, kwargs)
 
     def acceptConnection(self, *args, **kwargs):
         self._add_event('accept-connection', args, kwargs)
 
     def onAppStart(self, *args, **kwargs):
-        self._add_event('app-start', args, kwargs)
+        self._add_event('on-app-start', args, kwargs)
 
 
 class ApplicationRegisteringTestCase(unittest.TestCase):
@@ -311,7 +311,7 @@ class ServerFactoryTestCase(unittest.TestCase):
 
 
     def connect(self, app, protocol):
-        client = app.buildClient(self.protocol)
+        client = app.buildClient(self.protocol, {'app': 'foo'})
 
         app.acceptConnection(client)
 
@@ -418,8 +418,8 @@ class ConnectingTestCase(unittest.TestCase):
 
         self.assertEqual(state, {})
 
-    def connect(self, packet):
-        return self.control.onConnect(packet)
+    def connect(self, params, *args):
+        return self.control.onConnect(params, *args)
 
     def test_invokable_target(self):
         self.assertEqual(self.control.getInvokableTarget('connect'),
@@ -503,7 +503,7 @@ class ConnectingTestCase(unittest.TestCase):
 
     def test_success(self):
         """
-        Ensure a successful connection
+        Ensure a successful connection to application
         """
         a = self.factory.applications['what'] = SimpleApplication()
 
@@ -543,7 +543,53 @@ class ConnectingTestCase(unittest.TestCase):
 
         return d
 
+    def test_connect_args(self):
+        """
+        Ensure a successful connection to application with optional user
+        arguments being passed.
+
+        The arguments should be available to various application methods
+        such as onConnect, buildClient, etc.
+        """
+        a = self.factory.applications['what'] = SimpleApplication()
+        a.client = object()
+
+        client_params = {'app': 'what'} # Connect packet parameters
+        client_args = ("foo", "bar") # Arguments passed to NC.connect()
+
+        d = self.connect(client_params, *client_args)
+
+        def check_status(res):
+            name, args, kwargs = a.events.pop()
+            self.assertEqual(name, 'on-connect-accept')
+
+            name, args, kwargs = a.events.pop()
+            self.assertEqual(name, 'accept-connection')
+
+            name, args, kwargs = a.events.pop()
+            self.assertEqual(name, 'on-connect')
+            self.assertIdentical(args[0], a.client)
+            self.assertEqual(args[1:], client_args)
+            self.assertEqual(len(args), 3)
+            self.assertEqual(kwargs, {})
+
+            name, args, kwargs = a.events.pop()
+            self.assertEqual(name, 'build-client')
+            self.assertIdentical(args[0], self.protocol)
+            self.assertEqual(args[1], client_params)
+            self.assertEqual(args[2:], client_args)
+            self.assertEqual(len(args), 4)
+
+        d.addCallback(check_status)
+
+        self.protocol.onDownstreamBandwidth(2000, 2)
+
+        return d
+
     def test_reject(self):
+        """
+        Test the connection being rejected
+        """
         a = self.factory.applications['what'] = SimpleApplication()
         a.reject = True
         a.client = object()
@@ -562,9 +608,36 @@ class ConnectingTestCase(unittest.TestCase):
 
             name, args, kwargs = a.events.pop()
 
-            self.assertEqual(name, 'connect-reject')
+            self.assertEqual(name, 'on-connect-reject')
             self.assertIdentical(args[0], a.client)
             self.assertEqual(len(args), 2)
+            self.assertEqual(kwargs, {})
+
+        d.addCallback(check_status)
+
+        return d
+
+    def test_reject_with_args(self):
+        """
+        Test that the arguments passed to NetConnection.connect() are passed
+        to onConnectReject
+        """
+        a = self.factory.applications['what'] = SimpleApplication()
+        a.reject = True
+        a.client = object()
+
+        client_params = {'app': 'what'} # Connect packet parameters
+        client_args = ("foo", "bar") # Arguments passed to NC.connect()
+
+        d = self.connect(client_params, *client_args)
+
+        def check_status(res):
+            name, args, kwargs = a.events.pop()
+
+            self.assertEqual(name, 'on-connect-reject')
+            self.assertIdentical(args[0], a.client)
+            self.assertEqual(args[2:], client_args)
+            self.assertEqual(len(args), 4)
             self.assertEqual(kwargs, {})
 
         d.addCallback(check_status)
@@ -586,7 +659,7 @@ class ApplicationInterfaceTestCase(ServerFactoryTestCase):
         ServerFactoryTestCase.setUp(self)
 
         self.app = server.Application()
-        self.client = self.app.buildClient(self.protocol)
+        self.client = self.app.buildClient(self.protocol, {'app': 'foo'})
         self.app.acceptConnection(self.client)
 
         return self.factory.registerApplication('foo', self.app)
