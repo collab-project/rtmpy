@@ -16,14 +16,16 @@
 """
 Server implementation.
 """
+import urlparse
 
 from zope.interface import Interface, Attribute, implements
 from twisted.internet import protocol, defer
 from twisted.python import failure, log
 
 from rtmpy import util, exc, versions
-from rtmpy.protocol.rtmp import message, expose, status
+from rtmpy import message, rpc, status, core
 from rtmpy.protocol import rtmp, handshake, version
+from rtmpy.status import codes
 
 
 class IApplication(Interface):
@@ -197,7 +199,8 @@ class Client(object):
         self.nc.call(name, *args)
 
 
-class NetStream(rtmp.NetStream):
+
+class NetStream(core.NetStream):
     """
     A server side NetStream. Knows nothing of L{IApplication}s but interfaces
     directly with the L{ServerProtocol} (which does). A NetStream is dumb and
@@ -214,7 +217,7 @@ class NetStream(rtmp.NetStream):
     """
 
     def __init__(self, nc, streamId):
-        rtmp.NetStream.__init__(self, nc, streamId)
+        core.NetStream.__init__(self, nc, streamId)
 
         self.state = None
         self.name = None
@@ -229,17 +232,17 @@ class NetStream(rtmp.NetStream):
         self.name = name
         self.state = 'publishing'
 
-    @expose
+    @rpc.expose
     def receiveAudio(self, audio):
         """
         """
 
-    @expose
+    @rpc.expose
     def receiveVideo(self, video):
         """
         """
 
-    @expose
+    @rpc.expose
     def publish(self, name, type_='live'):
         """
         Called by the peer to start pushing video/audio data.
@@ -272,7 +275,7 @@ class NetStream(rtmp.NetStream):
 
         return d
 
-    @expose
+    @rpc.expose
     def closeStream(self):
         """
         Called when the stream is closing.
@@ -333,7 +336,7 @@ class NetStream(rtmp.NetStream):
         if self.publisher:
             self.publisher.audioDataReceived(data, timestamp)
 
-    @expose('@setDataFrame')
+    @rpc.expose('@setDataFrame')
     def setDataFrame(self, name, meta):
         """
         Called by the peer to set the 'data frame'? Not quite sure what this is
@@ -350,7 +353,7 @@ class NetStream(rtmp.NetStream):
         if func and name == 'onMetaData':
             func(meta)
 
-    @expose
+    @rpc.expose
     def play(self, name, *args):
         d = defer.maybeDeferred(self.nc.playStream, name, self, *args)
 
@@ -414,8 +417,6 @@ class ServerProtocol(rtmp.RTMPProtocol):
     management. Provides a proxy between streams and the associated application.
     """
 
-    stream_class = NetStream
-
     def startStreaming(self):
         """
         Called when the RTMP handshake has been successfully negotiated and
@@ -426,7 +427,14 @@ class ServerProtocol(rtmp.RTMPProtocol):
         self.connected = False
         self.application = None
 
-    def getInvokableTarget(self, name):
+
+    def buildStream(self, streamId):
+        """
+        """
+        return NetStream(self, streamId)
+
+
+    def callExposedMethod(self, name, *args):
         """
         Used to match a callable based on the supplied name when a notify or
         invoke is encountered. Returns C{None} if not found.
@@ -439,11 +447,6 @@ class ServerProtocol(rtmp.RTMPProtocol):
 
         @see: L{rtmp.RTMPProtocol.getInvokableTarget}
         """
-        target = rtmp.RTMPProtocol.getInvokableTarget(self, name)
-
-        if target:
-            return target
-
         # all client methods are publicly accessible
         client = getattr(self, 'client', None)
 
@@ -451,7 +454,7 @@ class ServerProtocol(rtmp.RTMPProtocol):
             target = util.get_callable_target(client, name)
 
             if target:
-                return target
+                return defer.maybeDeferred(target, *args)
 
         application = getattr(self, 'application', None)
 
@@ -460,10 +463,12 @@ class ServerProtocol(rtmp.RTMPProtocol):
             target = util.get_callable_target(application, name)
 
             if target:
-                return target
+                return defer.maybeDeferred(target, *args)
+
+        return super(ServerProtocol, self).callExposedMethod(name, *args)
 
 
-    @expose('connect')
+    @rpc.expose('connect')
     def onConnect(self, params, *args):
         """
         Connects this protocol instance to an application. The application has
@@ -509,7 +514,7 @@ class ServerProtocol(rtmp.RTMPProtocol):
 
             self.sendMessage(message.ControlMessage(0, 0))
 
-            return rtmp.ExtraResult(result,
+            return rpc.CommandResult(result,
                 # what are these values?
                 {'mode': 1, 'capabilities': 31, 'fmsVer': 'FMS/3,5,1,516'})
 
@@ -521,11 +526,8 @@ class ServerProtocol(rtmp.RTMPProtocol):
             if self.application and self.client:
                 self.application.onConnectReject(self.client, fail, *args)
 
-            code = getattr(fail.value, 'code', 'NetConnection.Connect.Failed')
-            description = fail.getErrorMessage() or 'Internal Server Error'
-
-            return status.error(code, description,
-                objectEncoding=params.pop('objectEncoding', self.objectEncoding))
+            return status.fromFailure(fail, codes.NC_CONNECT_FAILED,
+                objectEncoding=self.objectEncoding)
 
         def chain_errback(f):
             self._pendingConnection.errback(f)
@@ -640,11 +642,11 @@ class ServerProtocol(rtmp.RTMPProtocol):
 
         try:
             self.application.onUnpublish(self.client, stream)
-        except Exception, e:
+        except Exception:
             log.err()
 
 
-    @expose
+    @rpc.expose
     def releaseStream(self, name):
         """
         Called when the stream is released. Not sure about this one.
@@ -677,6 +679,14 @@ class ServerProtocol(rtmp.RTMPProtocol):
 
         return d
 
+    def onControlMessage(self, *args):
+        """
+        """
+
+
+    def onBytesRead(self, *args):
+        """
+        """
 
 class StreamPublisher(object):
     """
@@ -865,7 +875,7 @@ class Application(object):
 
         try:
             self.onDisconnect(client)
-        except Exception, e:
+        except Exception:
             log.err()
 
 
@@ -881,8 +891,26 @@ class Application(object):
         @param args: The client supplied arguments to NetConnection.connect()
         """
         c = self.client(protocol)
-
         c.id = util.generateBytes(9, readable=True)
+
+        # Inject properties into the client object
+        # TODO: Evaluate if these should be defined with @property in the
+        #  Client class itself.
+        c.application = self
+
+        try:
+            c.ip = c.nc.transport.getPeer().host
+        except AttributeError:
+            c.ip = None
+
+        tcUrl = params.get('tcUrl', '')
+        c.protocol = urlparse.urlparse(tcUrl)[0]
+        if c.protocol == '':
+            c.protocol = None
+
+        c.pageUrl = params.get('pageUrl', None)
+        c.uri = params.get('tcUrl', None)
+        c.agent = params.get('flashVer', None)
 
         return c
 

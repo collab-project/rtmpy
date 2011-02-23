@@ -20,8 +20,9 @@ from twisted.trial import unittest
 from twisted.internet import defer, reactor, protocol
 from twisted.test.proto_helpers import StringTransportWithDisconnection, StringIOWithoutClosing
 
-from rtmpy import server, exc
-from rtmpy.protocol.rtmp import message, ExtraResult
+from rtmpy import server, exc, rpc
+from rtmpy.protocol.rtmp import message
+
 
 
 class SimpleApplication(object):
@@ -73,6 +74,34 @@ class SimpleApplication(object):
 
     def onAppStart(self, *args, **kwargs):
         self._add_event('on-app-start', args, kwargs)
+
+
+class MockProtocol(object):
+    """
+    A mock protocol used to test protocol.transport.getPeer() requests
+    """
+    class Transport(object):
+
+        def __init__(self, good=True):
+            if good:
+                self._peer = self.GoodPeer()
+            else:
+                self._peer = self.BadPeer()
+
+        class GoodPeer(object):
+            host = "127.0.0.1"
+
+        class BadPeer(object):
+            pass
+
+        def getPeer(self):
+            return self._peer
+
+    def __init__(self, good=True):
+        self.transport = self.Transport(good)
+
+
+
 
 
 class ApplicationRegisteringTestCase(unittest.TestCase):
@@ -327,13 +356,6 @@ class ServerFactoryTestCase(unittest.TestCase):
         """
         return protocol.getStream(protocol.createStream())
 
-        def capture_status(s):
-            self.stream_status[stream] = s
-
-        stream.sendStatus = capture_status
-
-        return stream
-
 
 
 class ConnectingTestCase(unittest.TestCase):
@@ -368,12 +390,11 @@ class ConnectingTestCase(unittest.TestCase):
         """
         Ensures that a status message has been sent.
         """
-        stream, msg, whenDone = self.messages.pop(0)
+        stream, msg = self.messages.pop(0)
 
         self.assertEqual(self.messages, [])
 
         self.assertIdentical(stream, self.control)
-        self.assertEqual(whenDone, None)
 
         self.assertIsInstance(msg, message.Invoke)
         self.assertEqual(msg.name, 'onStatus')
@@ -408,7 +429,7 @@ class ConnectingTestCase(unittest.TestCase):
         """
         Ensure that the msg is of a particular type and state
         """
-        self.assertEqual(msg.RTMP_TYPE, type_)
+        self.assertEqual(message.typeByClass(msg), type_)
 
         d = msg.__dict__
 
@@ -420,10 +441,6 @@ class ConnectingTestCase(unittest.TestCase):
 
     def connect(self, params, *args):
         return self.control.onConnect(params, *args)
-
-    def test_invokable_target(self):
-        self.assertEqual(self.control.getInvokableTarget('connect'),
-            self.control.onConnect)
 
     def test_invoke(self):
         """
@@ -505,13 +522,13 @@ class ConnectingTestCase(unittest.TestCase):
         """
         Ensure a successful connection to application
         """
-        a = self.factory.applications['what'] = SimpleApplication()
+        self.factory.applications['what'] = SimpleApplication()
 
         d = self.connect({'app': 'what'})
 
         def check_status(res):
-            self.assertIsInstance(res, ExtraResult)
-            self.assertEqual(res.extra, {
+            self.assertIsInstance(res, rpc.CommandResult)
+            self.assertEqual(res.command, {
                 'capabilities': 31, 'fmsVer': 'FMS/3,5,1,516', 'mode': 1})
             self.assertEqual(res.result, {
                 'code': 'NetConnection.Connect.Success',
@@ -643,6 +660,52 @@ class ConnectingTestCase(unittest.TestCase):
         d.addCallback(check_status)
 
         return d
+
+    def test_client_properties(self):
+        """
+        Ensure that buildClient properly populates Client properties
+        """
+        a = server.Application()
+        p = MockProtocol(True)
+
+        client_params = {
+            'flashVer': 'MAC 10,2,154,13', 'app': 'what',
+            'pageUrl': 'http://foo.com/page',
+            'tcUrl': 'rtmp://localhost/live'
+            }
+
+        c = a.buildClient(p, client_params)
+
+        self.assertIdentical(c.nc, p)
+        self.assertIdentical(c.application, a)
+        self.assertEquals(c.ip, '127.0.0.1')
+        self.assertEquals(c.agent, 'MAC 10,2,154,13')
+        self.assertEquals(c.pageUrl, 'http://foo.com/page')
+        self.assertEquals(c.uri, 'rtmp://localhost/live')
+        self.assertEquals(c.protocol, 'rtmp')
+
+        return
+
+    def test_missing_client_properties(self):
+        """
+        Ensure that buildClient properly handles missing properties
+        """
+        a = server.Application()
+        p = MockProtocol(False)
+
+        client_params = {'app': 'what'}
+
+        c = a.buildClient(p, client_params)
+
+        self.assertIdentical(c.nc, p)
+        self.assertIdentical(c.application, a)
+        self.assertEquals(c.ip, None)
+        self.assertEquals(c.agent, None)
+        self.assertEquals(c.pageUrl, None)
+        self.assertEquals(c.uri, None)
+        self.assertEquals(c.protocol, None)
+
+        return
 
 
 class TestRuntimeError(RuntimeError):
@@ -780,7 +843,7 @@ class PublishingTestCase(ServerFactoryTestCase):
         d = s.publish('foo')
 
         def eb(f):
-            x = f.trap(exc.ConnectError)
+            f.trap(exc.ConnectError)
 
             self.assertEqual(f.getErrorMessage(), 'Cannot publish stream - not connected')
 
@@ -849,18 +912,11 @@ class PlayTestCase(ServerFactoryTestCase):
 
         self.assertFalse(d.called)
 
-        def cb(res):
-            self.assertTrue('foo' in self.app.streams)
+        res = self.app.publishStream(client, s, 'foo')
 
-            self.assertTrue(s in res.subscribers)
+        self.assertTrue('foo' in self.app.streams)
+        self.assertTrue(s in res.subscribers)
 
-        from twisted.internet import reactor
-
-        reactor.callLater(0, self.app.publishStream, client, s, 'foo')
-
-        d.addCallback(cb)
-
-        return d
 
     def test_existing(self):
         """

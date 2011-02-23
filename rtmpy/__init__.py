@@ -24,11 +24,11 @@ U{RTMP<http://en.wikipedia.org/wiki/Real_Time_Messaging_Protocol>}.
 @status: Pre-Alpha
 """
 
-
-from pyamf import versions as v
+from rtmpy import _version as v
 
 
 __all__ = ['__version__']
 
+
 #: RTMPy version number.
-__version__ = v.Version(0, 1, 1)
+__version__ = v.version

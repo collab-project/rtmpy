@@ -30,13 +30,14 @@ into fixed size body chunks.
 """
 
 from twisted.python import log, failure
-from twisted.internet import protocol, task, defer
+from twisted.internet import protocol, task
+from zope.interface import Interface, Attribute
 import pyamf
 from pyamf.util import BufferedByteStream
-from zope.interface import Interface, Attribute
 
-from rtmpy.protocol.rtmp import message, codec
-from rtmpy import exc
+from rtmpy import core
+from rtmpy import message
+from rtmpy.protocol.rtmp import codec
 
 
 class IChannelMeta(Interface):
@@ -51,314 +52,6 @@ class IChannelMeta(Interface):
     streamId = Attribute("An C{int} representing the linked stream.")
 
 
-#: Maximum number of streams that can be active per RTMP stream
-MAX_STREAMS = 0xffff
-
-#: A dictionary of
-_exposed_funcs = {}
-
-
-class RemoteCallFailed(failure.Failure):
-    """
-    """
-
-
-def expose(func):
-    """
-    A decorator that provides an easy way to expose methods that the peer can
-    'call' via RTMP C{invoke} or C{notify} messages.
-
-    Example usage::
-
-        @expose
-        def someRemoteMethod(self, foo, bar):
-            pass
-
-        @expose('foo-bar')
-        def anotherExposedMethod(self, *args):
-            pass
-
-    If expose is called with no args, the function name is used.
-    """
-    if hasattr(func, '__call__'):
-        _exposed_funcs[func.func_name] = func.func_name
-
-        return func
-
-    def decorator(f):
-        _exposed_funcs[func] = f.func_name
-
-        return f
-
-    return decorator
-
-
-class ExtraResult(object):
-    """
-    """
-
-    def __init__(self, result, extra=None):
-        self.result = result
-        self.extra = extra
-
-
-class BaseStream(object):
-    """
-    """
-
-    def __init__(self, streamId):
-        self.streamId = streamId
-
-        self.timestamp = 0
-        self.lastInvokeId = -1
-        self.activeInvokes = {}
-
-    def reset(self):
-        # TODO: check active invokes and errback
-        self.timestamp = 0
-        self.lastInvokeId = -1
-        self.activeInvokes = {}
-
-    def call(self, name, *args, **kwargs):
-        whenDone = kwargs.get('whenDone', None)
-
-        if not whenDone:
-            self.sendMessage(message.Invoke(name, 0, None, *args))
-
-            return
-
-        self.lastInvokeId += 1
-        invokeId = self.lastInvokeId
-
-        d = defer.Deferred()
-        m = message.Invoke(name, invokeId, None, *args)
-        self.activeInvokes[invokeId] = d
-
-        self.sendMessage(m, whenDone=whenDone)
-
-        return d
-
-    def sendStatus(self, code_or_status, command=None, **kwargs):
-        """
-        Informs the peer of a change of status.
-
-        @param code_or_status: A status message or L{status.Status} instance.
-            If a string is supplied it will be converted to an L{status.Status}.
-        @param command: The command object part of the L{message.Invoke}
-            message. Not quite sure what this achieves right now. Defaults to
-            L{None}.
-        @param kwargs: If a string status message is supplied then any extra
-            kwargs will form part of the generated L{status.Status} message.
-        """
-        if isinstance(code_or_status, status.Status):
-            status_obj = code_or_status
-        else:
-            status_obj = status.status(code_or_status, **kwargs)
-
-        msg = message.Invoke('onStatus', 0, *[command, status_obj])
-
-        self.sendMessage(msg)
-
-    def setTimestamp(self, timestamp, relative=True):
-        """
-        Sets the timestamp for this stream. The timestamp is measured in
-        milliseconds since an arbitrary epoch. This could be since the stream
-        started sending or receiving audio/video etc.
-
-        @param relative: Whether the supplied timestamp is relative to the
-            previous.
-        """
-        if relative:
-            self.timestamp += timestamp
-        else:
-            if timestamp < self.timestamp:
-                raise ValueError('Cannot set a negative timestamp')
-
-            self.timestamp = timestamp
-
-    def _handleInvokeResponse(self, result, id_):
-        """
-        Called to handle the response to an invoked method
-        """
-        if id_ == 0:
-            return result
-
-        d = self.activeInvokes.pop(id_, None)
-
-        if d is None:
-            self.sendMessage(message.Invoke('_error', id_, None, {}))
-
-            raise RuntimeError('Missing activeInvoke for id %r' % (id_,))
-
-        def write_error(fail):
-            code = getattr(fail.type, 'code', 'NetConnection.Call.Failed')
-
-            msg = message.Invoke('_error', id_, None, {
-                'level': 'error',
-                'code': code,
-                'description': fail.getErrorMessage()
-            })
-
-            self.sendMessage(msg)
-
-            return fail
-
-        def write_result(result):
-            if isinstance(result, ExtraResult):
-                msg = message.Invoke('_result', id_, result.extra, result.result)
-            else:
-                msg = message.Invoke('_result', id_, None, result)
-
-            self.sendMessage(msg)
-
-            return result
-
-        d.addCallbacks(write_result, write_error)
-
-        return result
-
-    def _callExposedMethod(self, name, *args):
-        """
-        Returns a L{defer.Deferred} that will hold the result of the called
-        method.
-
-        @param name: The name of the method to call
-        @param args: The supplied args from the invoke/notify call.
-        """
-        d = defer.Deferred()
-
-        # a request from the peer to call a local method
-        try:
-            func = self.getInvokableTarget(name)
-        except:
-            d.errback()
-
-            return d
-
-        if len(args) >= 1 and args[0] is None:
-            args = args[1:]
-
-        if func is None:
-            d.errback(exc.CallFailed('Unknown method %r' % (name,)))
-        else:
-            d = defer.maybeDeferred(func, *args)
-
-        return d
-
-    def onInvoke(self, name, id_, args, timestamp):
-        """
-        Called when an invoke message has been received from the peer. This
-        could be a request or a response depending on whether id_ is 'in use'.
-
-        @return: A deferred containing the result of the invoke call. This is
-            not strictly necessary but useful for testing purposes.
-        @retype: L{defer.Deferred}
-        """
-        d = self.activeInvokes.pop(id_, None)
-
-        if d:
-            # handle the response
-            if name == '_error':
-                d.errback(RemoteCallFailed(args))
-            elif name == '_result':
-                d.callback(*args)
-            else:
-                log.msg('Unhandled name for invoke response %r' % (name,))
-
-            return d
-
-        d = self._callExposedMethod(name, *args)
-
-        if id_ > 0:
-            self.activeInvokes[id_] = d
-
-        d.addBoth(self._handleInvokeResponse, id_)
-
-        return d
-
-    def onNotify(self, name, args, timestamp):
-        """
-        Call an exposed method on this peer but without regard to any return
-        value.
-
-        @param name: The name of the method to call
-        @param args: A list of arguments for this method.
-        @param timestamp: The timestamp at which this notify was called.
-        """
-        self._callExposedMethod(name, *args)
-
-
-    def getInvokableTarget(self, name):
-        """
-        Used to match a callable based on the supplied name when a notify or
-        invoke is encountered. Returns C{None} if not found.
-
-        This allows fine grained control over what this stream can expose to the
-        peer.
-
-        @param name: The name of the function to be mapped to a callable.
-        @return: A callable or C{None}
-        """
-        func_name = _exposed_funcs.get(name, None)
-
-        if not func_name:
-            return
-
-        return getattr(self, func_name)
-
-
-    def sendMessage(self, msg, whenDone=None):
-        """
-        Sends an RTMP message to the peer. This a low level method and is not
-        part of any public api. If its use is necessary then this is a bug.
-
-        Must be implemented by subclasses.
-
-        @param msg: The RTMP message to be sent by this stream.
-        @type: L{message.Message}
-        @param whenDone: An optional callback that is fired once the complete
-            encoded RTMP message has been sent to the peer. This is not the same
-            as a U{defer.Deferred} instance. When called it receives no params.
-        """
-        raise NotImplementedError
-
-
-class NetStream(BaseStream):
-    """
-    A stream within an RTMP connection. A stream can either send or receive
-    video/audio, or in the Flash vernacular - publish or subscribe.
-
-    Not sure about data just yet.
-    """
-
-    def __init__(self, nc, streamId):
-        BaseStream.__init__(self, streamId)
-
-        self.nc = nc
-
-    @property
-    def client(self):
-        return self.nc.client
-
-    def sendMessage(self, msg, whenDone=None):
-        """
-        Sends an RTMP message to the peer. This a low level method and is not
-        part of any public api. If its use is necessary then this is a bug.
-
-        @param msg: The RTMP message to be sent by this stream.
-        @type: L{message.Message}
-        @param whenDone: An optional callback that is fired once the complete
-            encoded RTMP message has been sent to the peer. This is not the same
-            as a U{defer.Deferred} instance. When called it receives no params.
-        """
-        self.nc.sendMessage(msg, whenDone, stream=self)
-
-    def deleteStream(self):
-        """
-        Called when this stream has been deleted from the NetConnection. Use it
-        to clean up.
-        """
-
 
 class DecodingDispatcher(object):
     """
@@ -367,8 +60,10 @@ class DecodingDispatcher(object):
     @param protocol: The L{RTMPProtocol} instance attached to the decoder.
     """
 
+
     def __init__(self, protocol):
         self.protocol = protocol
+
 
     def dispatchMessage(self, stream, datatype, timestamp, data):
         """
@@ -379,11 +74,15 @@ class DecodingDispatcher(object):
         @param timestamp: The absolute timestamp this message was received.
         @param data: The raw data for the message.
         """
-        m = message.get_type_class(datatype)()
+        try:
+            m = message.classByType(datatype)()
 
-        m.decode(BufferedByteStream(data))
+            m.decode(BufferedByteStream(data))
+            m.dispatch(stream, timestamp)
+        except:
+            self.protocol.logAndDisconnect(failure.Failure())
 
-        m.dispatch(stream, timestamp)
+
 
     def bytesInterval(self, bytes):
         """
@@ -393,10 +92,14 @@ class DecodingDispatcher(object):
 
         @param bytes: The number of bytes read when this interval was fired.
         """
-        self.protocol.sendMessage(message.BytesRead(bytes))
+        try:
+            self.protocol.sendMessage(message.BytesRead(bytes))
+        except:
+            self.protocol.logAndDisconnect(failure.Failure())
 
 
-class RTMPProtocol(protocol.Protocol, BaseStream):
+
+class RTMPProtocol(protocol.Protocol, core.NetConnection):
     """
     Provides basic handshaking and RTMP protocol support.
 
@@ -407,17 +110,12 @@ class RTMPProtocol(protocol.Protocol, BaseStream):
         connect packet.
     """
 
-    stream_class = NetStream
-
     HANDSHAKE = 'handshake'
     STREAM = 'stream'
 
     objectEncoding = pyamf.AMF0
     clientId = None
 
-    def __init__(self):
-        # this protocol is the NetConnection
-        BaseStream.__init__(self, 0)
 
     def logAndDisconnect(self, reason, *args, **kwargs):
         """
@@ -429,8 +127,6 @@ class RTMPProtocol(protocol.Protocol, BaseStream):
 
         return reason
 
-    def closeStream(self):
-        pass
 
     def connectionMade(self):
         """
@@ -443,6 +139,7 @@ class RTMPProtocol(protocol.Protocol, BaseStream):
 
         # TODO: apply uptime, version to the handshaker instead of 0, 0
         self.handshaker.start(0, 0)
+
 
     def connectionLost(self, reason):
         """
@@ -459,22 +156,20 @@ class RTMPProtocol(protocol.Protocol, BaseStream):
         if self.state == self.HANDSHAKE:
             del_attr('handshaker')
         elif self.state == self.STREAM:
-            for streamId, stream in self.streams.copy().iteritems():
-                if stream is self:
-                    continue
+            self.closeAllStreams()
 
-                stream.closeStream()
-                self.deleteStream(streamId)
+            self._decodingBuffer.truncate()
+            self._encodingBuffer.truncate()
 
-            self.closeStream()
-
-            del_attr('streams')
+            del_attr('_decodingBuffer')
+            del_attr('_encodingBuffer')
 
             del_attr('decoder_task')
             del_attr('decoder')
 
             del_attr('encoder_task')
             del_attr('encoder')
+
 
     def _stream_dataReceived(self, data):
         try:
@@ -485,15 +180,17 @@ class RTMPProtocol(protocol.Protocol, BaseStream):
         except:
             self.logAndDisconnect(failure.Failure())
 
+
     def _handshake_dataReceived(self, data):
         try:
             self.handshaker.dataReceived(data)
         except:
             self.logAndDisconnect(failure.Failure())
 
+
     def _startDecoding(self):
         """
-        Called to start asynchronously iterating the decoder.
+        Called to start the decoding process.
 
         @return: A C{Deferred} which will kill the task once the decoding is
             done or on error will kill the connection.
@@ -512,6 +209,7 @@ class RTMPProtocol(protocol.Protocol, BaseStream):
         self.decoder_task.addErrback(self.logAndDisconnect)
 
         return self.decoder_task
+
 
     def _startEncoding(self):
         """
@@ -533,6 +231,7 @@ class RTMPProtocol(protocol.Protocol, BaseStream):
 
         return self.encoder_task
 
+
     def handshakeSuccess(self, data):
         """
         Handshaking was successful, streaming now commences.
@@ -553,33 +252,17 @@ class RTMPProtocol(protocol.Protocol, BaseStream):
         """
         Handshaking was successful, streaming now commences.
         """
-        self.decoder = codec.Decoder(DecodingDispatcher(self), self)
-        self.encoder = codec.Encoder(self.transport)
+        self._decodingBuffer = BufferedByteStream()
+        self._encodingBuffer = BufferedByteStream()
+
+        self.decoder = codec.Decoder(DecodingDispatcher(self), self,
+            stream=self._decodingBuffer)
+        self.encoder = codec.Encoder(self.transport, stream=self._encodingBuffer)
 
         self.decoder_task = None
         self.encoder_task = None
 
-        self.streams = {
-            0: self
-        }
-        self._nextStreamId = 1
-
-    # IStreamFactory
-    def getStream(self, streamId):
-        """
-        Returns the L{NetStream} instance related to the C{streamId}.
-        """
-        s = self.streams.get(streamId, None)
-
-        if s is None:
-            # the peer needs to call 'createStream' to make new streams.
-            raise KeyError('Unknown stream %r' % (streamId,))
-
-        return s
-
-    # INetConnection
-
-    def sendMessage(self, msg, whenDone=None, stream=None):
+    def sendMessage(self, msg, stream=None):
         """
         Sends an RTMP message to the peer. Not part of a public api, use
         C{stream.sendMessage} instead.
@@ -594,6 +277,9 @@ class RTMPProtocol(protocol.Protocol, BaseStream):
         try:
             e = self.encoder
         except AttributeError:
+            if self.connected:
+                log.err('Attempted to send message %r when no encoder available' % (msg,))
+
             return
 
         if stream is None:
@@ -606,56 +292,33 @@ class RTMPProtocol(protocol.Protocol, BaseStream):
         # fast enough and the penalty for setting up a new thread is too high.
         msg.encode(buf)
 
-        e.send(buf.getvalue(), msg.RTMP_TYPE, stream.streamId,
-            stream.timestamp, whenDone)
+        e.send(buf.getvalue(), msg.__data_type__, stream.streamId, stream.timestamp)
 
         if e.active and not self.encoder_task:
             self._startEncoding()
 
+
     def setFrameSize(self, size):
-        self.sendMessage(message.FrameSize(size))
-        self.encoder.setFrameSize(size)
+        try:
+            self.sendMessage(message.FrameSize(size))
+            self.encoder.setFrameSize(size)
+        except:
+            self.logAndDisconnect(failure.Failure())
+
+            raise
+
 
     def getStreamingChannel(self, stream):
         """
         """
-        self.setFrameSize(4096)
-
         channel = self.encoder.acquireChannel()
 
-        if not channel:
+        if channel is None:
             # todo: make this better
             raise RuntimeError('No streaming channel available')
 
         return codec.StreamingChannel(channel, stream.streamId, self.transport)
 
-    @expose
-    def createStream(self):
-        """
-        Creates a new L{NetStream} and associates it with this protocol.
-        """
-        streamId = self._nextStreamId
-        self.streams[streamId] = self.stream_class(self, streamId)
-
-        self._nextStreamId += 1
-
-        return streamId
-
-    @expose
-    def deleteStream(self, streamId):
-        """
-        Deletes an existing L{NetStream} associated with this NetConnection.
-
-        @todo: What about error handling or if the NetStream is still receiving
-            or streaming data?
-        """
-        if streamId == 0:
-            return # can't delete the NetConnection
-
-        stream = self.streams.pop(streamId, None)
-
-        if stream:
-            stream.deleteStream()
 
     def onFrameSize(self, size, timestamp):
         """
@@ -674,15 +337,3 @@ class RTMPProtocol(protocol.Protocol, BaseStream):
             peer before sending an acknowledgement
         """
         self.decoder.setBytesInterval(interval)
-
-    def onUpstreamBandwidth(self, bandwidth, extra, timestamp):
-        """
-        """
-
-    def onControlMessage(self, msg, timestamp):
-        """
-        """
-
-    def onBytesRead(self, bytes, timestamp):
-        """
-        """
