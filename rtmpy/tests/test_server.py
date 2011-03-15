@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+#
 # Copyright the RTMPy Project
 #
 # RTMPy is free software: you can redistribute it and/or modify it under the
@@ -20,7 +22,7 @@ from twisted.trial import unittest
 from twisted.internet import defer, reactor, protocol
 from twisted.test.proto_helpers import StringTransportWithDisconnection, StringIOWithoutClosing
 
-from rtmpy import server, exc, rpc
+from rtmpy import server, exc, rpc, util
 from rtmpy.protocol.rtmp import message
 
 
@@ -129,6 +131,25 @@ class ApplicationRegisteringTestCase(unittest.TestCase):
 
         def cb(res):
             self.assertEqual(self.factory.applications, {'foo': self.app})
+
+        reactor.callLater(0, d.callback, None)
+        
+    def test_create_unicode(self):
+        """
+        Test initial args for L{server.ServerFactory}
+        """
+        self.factory = server.ServerFactory({'дак': self.app})
+
+        self.assertEqual(self.factory.applications, {'дак': self.app})
+
+        d = self.app.ret = defer.Deferred()
+
+        self.factory = server.ServerFactory({'дак': self.app})
+
+        self.assertEqual(self.factory.applications, {})
+
+        def cb(res):
+            self.assertEqual(self.factory.applications, {'дак': self.app})
 
         reactor.callLater(0, d.callback, None)
 
@@ -332,18 +353,17 @@ class ServerFactoryTestCase(unittest.TestCase):
         self.factory = server.ServerFactory()
         self.protocol = self.factory.buildProtocol(None)
         self.transport = StringTransportWithDisconnection()
-        self.protocol.transport = self.transport
-        self.transport.protocol = self.protocol
+        self.nc = server.NetConnection(self.protocol)
 
-        self.protocol.connectionMade()
+        self.protocol.makeConnection(self.transport)
+        self.transport.protocol = self.protocol
         self.protocol.versionReceived(3)
         self.protocol.handshakeSuccess('')
 
         self.manager = self.protocol.streamManager
 
-
     def connect(self, app, protocol):
-        client = app.buildClient(self.protocol, {'app': 'foo'})
+        client = app.buildClient(self.nc, {'app': 'foo'})
 
         app.acceptConnection(client)
 
@@ -359,6 +379,41 @@ class ServerFactoryTestCase(unittest.TestCase):
         """
         return manager.getStream(manager.createStream())
 
+
+class ServerFactoryDisconnectedTestCase(unittest.TestCase):
+    """
+    """
+
+    def setUp(self):
+        self.factory = server.ServerFactory()
+        self.protocol = self.factory.buildProtocol(None)
+        self.transport = StringTransportWithDisconnection()
+        self.nc = server.NetConnection(self.protocol)
+
+        self.protocol.connectionMade()
+        self.transport.protocol = self.protocol
+        self.protocol.transport = self.transport
+        self.protocol.versionReceived(3)
+        self.protocol.handshakeSuccess('')
+
+        self.manager = self.protocol.streamManager
+
+    def connect(self, app, protocol):
+        client = app.buildClient(self.nc, {'app': 'foo'})
+
+        app.acceptConnection(client)
+
+        protocol.nc.connected = True
+        protocol.nc.client = client
+        protocol.nc.application = app
+
+        return client
+
+    def createStream(self, manager):
+        """
+        Returns the L{server.NetStream} as created by the protocol
+        """
+        return manager.getStream(manager.createStream())
 
 
 class ConnectingTestCase(unittest.TestCase):
@@ -504,6 +559,30 @@ class ConnectingTestCase(unittest.TestCase):
         d.addCallback(cb)
 
         return d
+    
+    def test_random_failure_unicode(self):
+        """
+        If something random goes wrong, make sure the status is correctly set.
+        """
+        def bork(*args):
+            raise EnvironmentError('щоот')
+
+        self.patch(self.protocol.nc, '_onConnect', bork)
+
+        d = self.connect({})
+
+        def cb(res):
+            self.assertEqual(res, {
+                'code': 'NetConnection.Connect.Failed',
+                'description': 'щоот',
+                'level': 'error',
+                'objectEncoding': 0
+            })
+
+
+        d.addCallback(cb)
+
+        return d
 
     def test_unknown_application(self):
         self.assertEqual(self.factory.getApplication('what'), None)
@@ -514,6 +593,23 @@ class ConnectingTestCase(unittest.TestCase):
             self.assertEqual(res, {
                 'code': 'NetConnection.Connect.InvalidApp',
                 'description': "Unknown application 'what'",
+                'level': 'error',
+                'objectEncoding': 0
+            })
+
+        d.addCallback(cb)
+
+        return d
+    
+    def test_unknown_application_unicode(self):
+        self.assertEqual(self.factory.getApplication('what'), None)
+
+        d = self.connect({'app': 'щнат'})
+
+        def cb(res):
+            self.assertEqual(res, {
+                'code': 'NetConnection.Connect.InvalidApp',
+                'description': "Unknown application 'щнат'",
                 'level': 'error',
                 'objectEncoding': 0
             })
@@ -600,6 +696,51 @@ class ConnectingTestCase(unittest.TestCase):
             self.assertEqual(args[1], client_params)
             self.assertEqual(args[2:], client_args)
             self.assertEqual(len(args), 4)
+
+        d.addCallback(check_status)
+
+        self.protocol.onDownstreamBandwidth(2000, 2)
+
+        return d
+
+    def test_dynamic_app_success(self):
+        """
+        Ensure a successful connection
+        """
+        def getApplication(args):
+            return SimpleApplication()
+
+        self.patch(self.factory, "getApplication", getApplication)
+
+        d = self.connect({'app': 'what'})
+
+        def check_status(res):
+            self.assertIsInstance(res, rpc.CommandResult)
+            self.assertEqual(res.command, {
+                'capabilities': 31, 'fmsVer': 'FMS/3,5,1,516', 'mode': 1})
+            self.assertEqual(res.result, {
+                'code': 'NetConnection.Connect.Success',
+                'objectEncoding': 0,
+                'description': 'Connection succeeded.',
+                'level': 'status'
+            })
+
+            msg, = self.messages.pop(0)
+
+            self.assertMessage(msg, message.DOWNSTREAM_BANDWIDTH,
+                bandwidth=2500000L)
+
+            msg, = self.messages.pop(0)
+
+            self.assertMessage(msg, message.UPSTREAM_BANDWIDTH,
+                bandwidth=2500000L, extra=2)
+
+            msg, = self.messages.pop(0)
+
+            self.assertMessage(msg, message.CONTROL,
+                type=0, value1=0)
+
+            self.assertEqual(self.messages, [])
 
         d.addCallback(check_status)
 
@@ -726,7 +867,7 @@ class ApplicationInterfaceTestCase(ServerFactoryTestCase):
         ServerFactoryTestCase.setUp(self)
 
         self.app = server.Application()
-        self.client = self.app.buildClient(self.protocol, {'app': 'foo'})
+        self.client = self.app.buildClient(self.nc, {'app': 'foo'})
         self.app.acceptConnection(self.client)
 
         return self.factory.registerApplication('foo', self.app)
@@ -834,30 +975,8 @@ class PublishingTestCase(ServerFactoryTestCase):
 
 
         return d.addCallback(cb)
-
-
-    def test_not_connected(self):
-        """
-        Test when
-        """
-        s = self.createStream()
-
-        self.assertFalse(self.protocol.connected)
-
-        d = s.publish('foo')
-
-        def eb(f):
-            f.trap(exc.ConnectError)
-
-            self.assertEqual(f.getErrorMessage(), 'Cannot publish stream - not connected')
-
-            self.assertStatus(s, {
-                'code': 'NetConnection.Call.Failed',
-                'description': 'Cannot publish stream - not connected',
-                'level': 'error'
-            })
-
-        return d.addErrback(eb)
+        
+        
 
 
     def test_kill_connection_after_successful_publish(self):
@@ -885,6 +1004,63 @@ class PublishingTestCase(ServerFactoryTestCase):
         d.addCallback(kill_connection)
 
         return d
+
+
+class PublishingDisconnectedTestCase(ServerFactoryDisconnectedTestCase):
+    """
+    Tests for publishing a stream when the transport is disconnected
+    """
+
+    def setUp(self):
+        ServerFactoryDisconnectedTestCase.setUp(self)
+
+        self.stream_status = {}
+
+        self.app = server.Application()
+
+        return self.factory.registerApplication('foo', self.app)
+
+
+    def createStream(self):
+        """
+        Returns the L{server.NetStream} as created by the protocol
+        """
+        stream = self.manager.getStream(self.manager.createStream())
+
+        def capture_status(s):
+            self.stream_status[stream] = s
+
+        stream.sendStatus = capture_status
+
+        return stream
+
+
+    def assertStatus(self, stream, s):
+        self.assertEqual(self.stream_status[stream], s)
+
+
+    def test_not_connected(self):
+        """
+        Test publish with a disconnected transport
+        """
+        s = self.createStream()
+
+        self.assertFalse(self.protocol.connected)
+
+        d = s.publish('foo')
+
+        def eb(f):
+            f.trap(exc.ConnectError)
+
+            self.assertEqual(f.getErrorMessage(), 'Cannot publish stream - not connected')
+
+            self.assertStatus(s, {
+                'code': 'NetConnection.Call.Failed',
+                'description': 'Cannot publish stream - not connected',
+                'level': 'error'
+            })
+
+        return d.addErrback(eb)
 
 
 class PlayTestCase(ServerFactoryTestCase):
@@ -946,3 +1122,112 @@ class PlayTestCase(ServerFactoryTestCase):
         d.addCallback(cb)
 
         return d
+
+
+
+class Publisher(object):
+    """
+    A value object that acts like a publisher.
+    """
+
+    meta_data = None
+
+
+    def onMetaData(self, data):
+        self.meta_data = data
+
+
+
+class SendTestCase(ServerFactoryTestCase):
+    """
+    Tests for L{server.NetStream.send}
+    """
+
+    def setUp(self):
+        ServerFactoryTestCase.setUp(self)
+
+        self.app = server.Application()
+
+        d = self.factory.registerApplication('foo', self.app)
+
+        def cb(res):
+            self.client = self.connect(self.app, self.protocol)
+            m = self.protocol.streamManager
+
+            self.stream = self.createStream(m)
+            self.publisher = Publisher()
+            self.stream.publishingStarted(self.publisher, 'spammy')
+
+            return res
+
+        d.addCallback(cb)
+
+        return d
+
+
+    def sendMessage(self, msg, stream=None, timestamp=None):
+        """
+        Dispatches an RTMP message to the protocol. Useful for mocking 'real'
+        RTMP calls.
+        """
+        if stream is None:
+            stream = self.protocol
+
+        msg.dispatch(stream, timestamp or 0)
+
+
+    def setMetaData(self, data):
+        """
+        Dispatches an RTMP message to call L{NetStream.setDataFrame}.
+        """
+        m = message.Notify('@setDataFrame', 'onMetaData', data)
+
+        self.sendMessage(m, self.stream)
+
+
+    def clearMetaData(self):
+        """
+        Dispatches an RTMP message to call L{NetStream.clearDataFrame}.
+        """
+        m = message.Notify('@clearDataFrame', 'onMetaData')
+
+        self.sendMessage(m, self.stream)
+
+        self.assertEqual(self.publisher.meta_data, {})
+
+
+    def assertMetaData(self, data):
+        """
+        Short cut to check that the meta data
+        """
+        self.assertEqual(self.publisher.meta_data, data)
+
+
+    def test_set_data_frame(self):
+        """
+        An RTMP message setting the meta data must call
+        L{ServerProtocol.setDataFrame} accordingly, which in turn must call
+        L{stream.publisher.onMetaData}.
+        """
+        self.setMetaData({})
+
+        self.setMetaData({'foo': 'bar'})
+        self.assertMetaData({'foo': 'bar'})
+
+        self.setMetaData({'foo': 'baz'})
+        self.assertMetaData({'foo': 'baz'})
+
+        self.setMetaData({'gak': 'baz'})
+        self.assertMetaData({'gak': 'baz'})
+
+
+    def test_clear_data_frame(self):
+        """
+        An RTMP message setting the meta data must call
+        L{ServerProtocol.clearDataFrame} accordingly, which in turn must call
+        L{stream.publisher.onMetaData} with the appropriate args.
+        """
+        self.setMetaData({'gak': 'baz'})
+
+        self.clearMetaData()
+        self.assertMetaData({})

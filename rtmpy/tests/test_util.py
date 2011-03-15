@@ -166,7 +166,6 @@ class GetCallableTargetTestCase(unittest.TestCase):
         self.assertTrue(c, '__call__')
 
 
-
 if not sys.platform.startswith('linux'):
     LinuxUptimeTestCase.skip = 'Tested platform is not linux'
 

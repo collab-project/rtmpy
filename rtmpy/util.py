@@ -264,7 +264,6 @@ def generateBytes(length, readable=False):
     return bytes
 
 
-
 def get_callable_target(obj, name):
     """
     Returns a callable object based on the attribute of C{obj}.
@@ -309,3 +308,22 @@ def add_to_class(f, depth=1):
     wrap.__doc__ = f.__doc__
 
     return wrap
+
+    
+
+def getFailureMessage(failure):
+    """
+    Takes a L{twisted.python.failure.Failure} and returns the error message
+
+    Replaces L{Failure.getErrorMessage} since it currently cannot handle
+    unicode properly.
+    """
+    value = getattr(failure.value, "value", None)
+
+    if not value:
+        try:
+            value = failure.value.args[0]
+        except IndexError:
+            value = ""
+
+    return value

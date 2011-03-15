@@ -260,7 +260,7 @@ class NetStream(core.NetStream):
 
             if isinstance(result, failure.Failure):
                 code = getattr(result.value, 'code', 'NetConnection.Call.Failed')
-                description = result.getErrorMessage() or 'Internal Server Error'
+                description = util.getFailureMessage(result) or 'Internal Server Error'
 
                 s = status.error(code, description)
             else:
@@ -289,7 +289,7 @@ class NetStream(core.NetStream):
             def send_status(res):
                 self.sendStatus(status.status('NetStream.Unpublish.Success',
                     description='%s is now unpublished.' % (self.name,),
-                    clientid=self.nc.clientId))
+                    clientid=self.nc.client.id))
 
                 return res
 
@@ -354,6 +354,23 @@ class NetStream(core.NetStream):
         if func and name == 'onMetaData':
             func(meta)
 
+
+    @rpc.expose('@clearDataFrame')
+    def clearDataFrame(self, name):
+        """
+        Called by the peer to clear the metadata from a live stream.
+
+        We hand this responsibility to the publisher.
+
+        @param name: This appears to be the name of the event to call. It is
+            always 'onMetaData'.
+        """
+        func = getattr(self.publisher, name, None)
+
+        if func and name == 'onMetaData':
+            func(dict())
+
+
     @rpc.expose
     def play(self, name, *args):
         d = defer.maybeDeferred(self.nc.playStream, name, self, *args)
@@ -388,7 +405,7 @@ class NetStream(core.NetStream):
 
         def eb(fail):
             code = getattr(fail.value, 'code', 'NetStream.Play.Failed')
-            description = fail.getErrorMessage() or 'Internal Server Error'
+            description = util.getFailureMessage(fail) or 'Internal Server Error'
 
             self.sendStatus(status.error(code, description))
 
@@ -498,7 +515,7 @@ class NetConnection(core.NetConnection):
         propagate the event to the attached application (if one exists)
         """
         if self.application:
-            self.application.disconnect(self.client)
+            self.application._disconnect(self.client)
 
 
     def playStream(self, name, subscriber, *args):
@@ -631,21 +648,15 @@ class NetConnection(core.NetConnection):
         @param params: The connection parameters sent from the client, this
             includes items such as the connection url, and user agent
         @type params: C{dict}
+
+        @param args: arguments from RTMP connect packet
         """
         if self.application:
             # This protocol has already successfully completed a connection
             # request.
             raise exc.ConnectFailed('Already connected.')
 
-        try:
-            appName = params['app']
-        except KeyError:
-            raise exc.ConnectFailed("Bad connect packet (missing 'app' key)")
-
-        self.application = self.protocol.factory.getApplication(appName)
-
-        if self.application is None:
-            raise exc.InvalidApplication('Unknown application %r' % (appName,))
+        self.application = self.protocol.factory.getApplicationWithDefault(params, *args)
 
         self.client = self.application.buildClient(self, params, *args)
 
@@ -698,7 +709,6 @@ class ServerProtocol(rtmp.RTMPProtocol):
         """
         """
         self.nc = self.netconnection(self)
-        self.nc.protocol = self
 
         rtmp.RTMPProtocol.startStreaming(self)
 
@@ -745,7 +755,7 @@ class ServerProtocol(rtmp.RTMPProtocol):
         """
 
 
-    
+
 class StreamPublisher(object):
     """
     Linked to a L{NetStream} when it makes a publish request. Manages a list of
@@ -908,8 +918,16 @@ class Application(object):
         """
         self.clients[client.id] = client
 
-
     def disconnect(self, client):
+        """
+        Disconnects the client from the server.
+        """
+        self._disconnect(client)
+
+        client.nc.protocol.transport.loseConnection()
+
+
+    def _disconnect(self, client):
         """
         Removes the C{client} from this application.
         """
@@ -927,9 +945,10 @@ class Application(object):
 
             self.streams.pop(name, None)
 
-        del self.clients[client.id]
+        c = self.clients.pop(client.id, None)
 
-        client.id = None
+        if c is None:
+            return
 
         try:
             self.onDisconnect(client)
@@ -1034,7 +1053,7 @@ class Application(object):
             self._streamingClients[client] = stream
 
         if client.id != stream.client.id:
-            raise exc.BadNameError('%s is already used' % (name,))
+            raise exc.BadNameError("'%s' is already used" % (name,))
 
         self._runCallbacksForPublishedStream(name, stream)
 
@@ -1045,7 +1064,7 @@ class Application(object):
         try:
             source = self.streams[name]
         except KeyError:
-            raise exc.BadNameError('Unknown stream %r' % (name,))
+            raise exc.BadNameError("Unknown stream '%s'" % (name,))
 
         if source.client.id != stream.client.id:
             raise exc.BadNameError('Unable to unpublish stream')
@@ -1167,12 +1186,36 @@ class ServerFactory(protocol.ServerFactory):
         return self.handshake(observer, output)
 
 
-    def getApplication(self, name):
+    def getApplicationWithDefault(self, params, *args):
         """
-        Returns the active L{IApplication} instance related to C{name}. If
+        Checks if an application exists within the static table. If an
+        application cannot be found there, getApplication is called.
+
+        @param args: arguments from RTMP connect packet
+        """
+        try:
+            appName = params['app']
+        except KeyError:
+            raise exc.ConnectFailed("Bad connect packet (missing 'app' key)")
+
+        if appName in self.applications:
+            return self.applications[appName]
+
+        app = self.getApplication(params, *args)
+
+        if app is None:
+            raise exc.InvalidApplication("Unknown application '%s'" % (appName,))
+
+        return app
+
+    def getApplication(self, params, *args):
+        """
+        Returns the active L{IApplication} instance related to C{args}. If
         there is no active application, C{None} is returned.
+
+        @param args: arguments from RTMP connect packet
         """
-        return self.applications.get(name, None)
+        return None
 
 
     def registerApplication(self, name, app):
@@ -1236,7 +1279,7 @@ class ServerFactory(protocol.ServerFactory):
         try:
             app = self.applications[name]
         except KeyError:
-            raise exc.InvalidApplication('Unknown application %r' % (name,))
+            raise exc.InvalidApplication("Unknown application '%s'" % (name,))
 
         # TODO: run through the attached clients and signal the app shutdown.
         d = defer.maybeDeferred(app.shutdown)
