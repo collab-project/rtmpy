@@ -411,7 +411,7 @@ class InvokingTestCase(ProtocolTestCase):
             fail.trap(exc.CallFailed)
 
             self.assertEqual(util.getFailureMessage(fail),
-                "Unknown method 'foo'")
+                "Method not found (foo)")
 
         def check_messages(res):
             self.assertEqual(self.messages, [])
@@ -435,7 +435,7 @@ class InvokingTestCase(ProtocolTestCase):
             fail.trap(exc.CallFailed)
 
             self.assertEqual(util.getFailureMessage(fail),
-                "Unknown method 'дак'")
+                "Method not found (дак)")
 
         def check_messages(res):
             self.assertEqual(self.messages, [])
@@ -450,7 +450,7 @@ class InvokingTestCase(ProtocolTestCase):
         """
         self.assertEqual(self.stream.targets.get('foo', None), None)
 
-        d = self.stream.onInvoke('foo', 1, [], 0)
+        d = self.stream.onInvoke('foo', 2, [], 0)
 
         self.assertIsInstance(d, defer.Deferred)
 
@@ -461,7 +461,7 @@ class InvokingTestCase(ProtocolTestCase):
             fail.trap(exc.CallFailed)
 
             self.assertEqual(util.getFailureMessage(fail),
-                "Unknown method 'foo'")
+                "Method not found (foo)")
 
         def check_messages(res):
             msg, stream = self.messages.pop(0)
@@ -471,11 +471,11 @@ class InvokingTestCase(ProtocolTestCase):
             self.assertIdentical(stream, self.stream)
 
             self.assertIsInstance(msg, message.Invoke)
-            self.assertEqual(msg.id, 1)
+            self.assertEqual(msg.id, 2)
             self.assertEqual(msg.name, '_error')
             self.assertEqual(msg.argv, [None, {
                 'code': 'NetConnection.Call.Failed',
-                'description': "Unknown method 'foo'",
+                'description': "Method not found (foo)",
                 'level': 'error'}])
 
         d.addCallbacks(cb, eb).addCallback(check_messages)
@@ -486,7 +486,7 @@ class InvokingTestCase(ProtocolTestCase):
         """
         Invoke a method that does not exist with a response expected.
         """
-        d = self.stream.onInvoke('дак', 1, [], 0)
+        d = self.stream.onInvoke('дак', 2, [], 0)
 
         self.assertIsInstance(d, defer.Deferred)
 
@@ -497,7 +497,7 @@ class InvokingTestCase(ProtocolTestCase):
             fail.trap(exc.CallFailed)
 
             self.assertEqual(util.getFailureMessage(fail),
-                "Unknown method 'дак'")
+                "Method not found (дак)")
 
         def check_messages(res):
             msg, stream = self.messages.pop(0)
@@ -507,11 +507,11 @@ class InvokingTestCase(ProtocolTestCase):
             self.assertIdentical(stream, self.stream)
 
             self.assertIsInstance(msg, message.Invoke)
-            self.assertEqual(msg.id, 1)
+            self.assertEqual(msg.id, 2)
             self.assertEqual(msg.name, '_error')
             self.assertEqual(msg.argv, [None, {
                 'code': 'NetConnection.Call.Failed',
-                'description': "Unknown method 'дак'",
+                'description': "Method not found (дак)",
                 'level': 'error'}])
 
         d.addCallbacks(cb, eb).addCallback(check_messages)
@@ -527,7 +527,7 @@ class InvokingTestCase(ProtocolTestCase):
 
         self.targets['foo'] = func
 
-        d = self.stream.onInvoke('foo', 1, [], 0)
+        d = self.stream.onInvoke('foo', 2, [], 0)
         self.assertIsInstance(d, defer.Deferred)
 
         def check_messages(res):
@@ -538,7 +538,7 @@ class InvokingTestCase(ProtocolTestCase):
             self.assertIdentical(stream, self.stream)
 
             self.assertIsInstance(msg, message.Invoke)
-            self.assertEqual(msg.id, 1)
+            self.assertEqual(msg.id, 2)
             self.assertEqual(msg.name, '_result')
             self.assertEqual(msg.argv, [None, 'bar'])
 
@@ -555,7 +555,7 @@ class InvokingTestCase(ProtocolTestCase):
 
         self.targets['дак'] = func
 
-        d = self.stream.onInvoke('дак', 1, [], 0)
+        d = self.stream.onInvoke('дак', 2, [], 0)
         self.assertIsInstance(d, defer.Deferred)
 
         def check_messages(res):
@@ -566,7 +566,7 @@ class InvokingTestCase(ProtocolTestCase):
             self.assertIdentical(stream, self.stream)
 
             self.assertIsInstance(msg, message.Invoke)
-            self.assertEqual(msg.id, 1)
+            self.assertEqual(msg.id, 2)
             self.assertEqual(msg.name, '_result')
             self.assertEqual(msg.argv, [None, 'вая'])
 
@@ -583,7 +583,7 @@ class InvokingTestCase(ProtocolTestCase):
 
         self.targets['foo'] = func
 
-        d = self.stream.onInvoke('foo', 1, [], 0)
+        d = self.stream.onInvoke('foo', 2, [], 0)
         self.assertIsInstance(d, defer.Deferred)
 
         def eb(fail):
@@ -597,7 +597,7 @@ class InvokingTestCase(ProtocolTestCase):
             self.assertIdentical(stream, self.stream)
 
             self.assertIsInstance(msg, message.Invoke)
-            self.assertEqual(msg.id, 1)
+            self.assertEqual(msg.id, 2)
             self.assertEqual(msg.name, '_error')
             self.assertEqual(msg.argv, [None, {
                 'code': 'NetConnection.Call.Failed',
@@ -617,7 +617,7 @@ class InvokingTestCase(ProtocolTestCase):
 
         self.targets['дак'] = func
 
-        d = self.stream.onInvoke('дак', 1, [], 0)
+        d = self.stream.onInvoke('дак', 2, [], 0)
         self.assertIsInstance(d, defer.Deferred)
 
         def eb(fail):
@@ -631,7 +631,7 @@ class InvokingTestCase(ProtocolTestCase):
             self.assertIdentical(stream, self.stream)
 
             self.assertIsInstance(msg, message.Invoke)
-            self.assertEqual(msg.id, 1)
+            self.assertEqual(msg.id, 2)
             self.assertEqual(msg.name, '_error')
             self.assertEqual(msg.argv, [None, {
                 'code': 'NetConnection.Call.Failed',
@@ -653,7 +653,7 @@ class InvokingTestCase(ProtocolTestCase):
 
         self.targets['foo'] = func
 
-        d = self.stream.onInvoke('foo', 1, ['foo', 'bar', 'baz'], 0)
+        d = self.stream.onInvoke('foo', 2, ['foo', 'bar', 'baz'], 0)
         self.assertIsInstance(d, defer.Deferred)
 
         def check_messages(res):
@@ -678,7 +678,7 @@ class InvokingTestCase(ProtocolTestCase):
             self.assertIdentical(stream, self.stream)
 
             self.assertIsInstance(msg, message.Invoke)
-            self.assertEqual(msg.id, 1)
+            self.assertEqual(msg.id, 2)
             self.assertEqual(msg.name, '_result')
             self.assertEqual(msg.argv, [None, 'foo'])
 
@@ -701,7 +701,7 @@ class InvokingTestCase(ProtocolTestCase):
 
         self.targets['foo'] = func
 
-        d = self.stream.onInvoke('foo', 1, [], 0)
+        d = self.stream.onInvoke('foo', 2, [], 0)
         self.assertIsInstance(d, defer.Deferred)
 
         return wait_ok
